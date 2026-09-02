@@ -1,94 +1,173 @@
-# 安装与部署
+# Schema Atlas 本地部署（不使用 Docker）
 
-## 1. 环境要求
+本版本包含网页服务和本地 Claude Code 桥接服务。推荐使用 systemd 托管，关闭 SSH 后仍会运行，并在系统重启后自动启动。
 
-- Node.js `22.13.0` 或更高版本
-- npm `10` 或更高版本
-- 推荐 Linux；项目构建脚本使用 Bash 与 GNU `timeout`
-- 生产服务器建议至少 1 核 CPU、1 GB 内存
+## 1. 检查 `claude` 用户环境
 
-确认版本：
+服务固定使用非 root 用户 `claude`。先切换到该用户，确认 Node.js 22.13 以上，并完成 Claude Code 登录：
 
 ```bash
+sudo -iu claude
 node --version
-npm --version
+claude --version
+claude auth status
+claude -p "只回复 OK"
+exit
 ```
 
-## 2. 本地开发
+最后一条命令成功返回后，网页发起的任务才能复用同一用户的登录状态。不要把 root 用户下的 `~/.nvm` 或 `~/.claude` 直接复制给 `claude`。
 
-解压源码后进入目录：
+## 2. 安装并构建
 
-```bash
-unzip schema-atlas-source-v4.zip
-cd schema-atlas-source-v4
-npm ci
-npm run dev
-```
-
-开发服务器启动后，以终端输出的地址为准。Vite 默认使用 `http://localhost:5173`。
-
-局域网访问：
+进入源码目录：
 
 ```bash
-npm run dev -- --host 0.0.0.0
-```
-
-## 3. 生产构建
-
-```bash
-npm run lint
+cd /你的源码目录/schema-atlas
+npm ci --no-audit --no-fund
 npm run build
-npm run start -- --hostname 0.0.0.0 --port 3000
 ```
 
-访问 `http://服务器IP:3000`。构建产物位于 `dist/`。
-
-长期运行时可使用 systemd、Supervisor 或其他进程管理器守护上述启动命令，并在前方配置 Nginx 或 Caddy。
-
-## 4. Nginx 反向代理示例
-
-```nginx
-server {
-    listen 80;
-    server_name schema.example.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-配置 HTTPS 时，可使用 Certbot 或由现有网关终止 TLS。
-
-## 5. JSON 导入规则
-
-每个 JSON 文件代表一张表，必须包含：
-
-- `tableName`
-- `description`
-- `folder`
-- `columns`
-- `foreignKeys`
-- `referencedBy`
-
-导入一个批次时只需填写 0 级域；每张表的 1 级域由 `folder` 自动生成。空的 0 级域进入“未归类”，空的 `folder` 进入“根目录”。
-
-## 6. 当前存储方式
-
-导入和删除结果保存在当前浏览器的 `localStorage` 中，没有服务端数据库，也不需要环境变量。刷新页面后数据仍会保留；清除该站点的浏览器数据会同时清空表数据。
-
-当前方式适合单机使用。团队共享时建议接入 SQLite / PostgreSQL，或将原始 JSON 保存到对象存储后由服务端生成关系索引。
-
-## 7. 常用命令
+运行环境自检：
 
 ```bash
-npm run dev      # 开发模式
-npm run lint     # 代码检查
-npm run build    # 生产构建
-npm run start    # 启动生产服务
+sudo -iu claude
+cd /你的源码目录/schema-atlas
+npm run ai:doctor
+exit
 ```
+
+如果 Node.js 通过 NVM 安装，上面的 `npm` 可能不在非交互式 PATH 中。这不影响安装脚本：它会从 `claude` 用户的 NVM 目录寻找最新可执行版本。
+
+## 3. 一条命令安装后台服务
+
+在源码根目录执行：
+
+```bash
+sudo bash scripts/install-systemd.sh
+```
+
+安装脚本会：
+
+- 用 `claude` 用户运行服务，拒绝 root 运行；
+- 自动确定 Node.js 与 `claude` 的绝对路径；
+- 同时启动网页和 Claude Code 桥接层；
+- 只对外开放一个网页端口 `3000`；
+- 自动生成网页登录密码，保护高权限 Claude Code 接口；
+- 保存 Session、对话、草稿和 TODO 到 `.schema-atlas-ai/`；
+- 默认允许 Claude Code读取源码目录和 `/home/claude`。
+
+访问：
+
+```text
+http://服务器IP:3000
+```
+
+浏览器会弹出登录框。用户名和首次生成的随机密码会由安装命令直接打印；密码也保存在仅 root 可读的 `/etc/schema-atlas.env`。
+
+常用管理命令：
+
+```bash
+systemctl status schema-atlas
+journalctl -u schema-atlas -f
+systemctl restart schema-atlas
+systemctl stop schema-atlas
+```
+
+## 4. 配置可读取的参考资料目录
+
+编辑：
+
+```bash
+sudo vi /etc/schema-atlas.env
+```
+
+多个允许根目录用冒号分隔：
+
+```ini
+SCHEMA_ATLAS_HOST=0.0.0.0
+SCHEMA_ATLAS_PORT=3000
+SCHEMA_ATLAS_AUTH_USER=claude
+SCHEMA_ATLAS_AUTH_PASSWORD=请换成强随机密码
+SCHEMA_ATLAS_REFERENCE_ROOTS=/home/claude/repos:/home/claude/annotations:/data/domain-docs
+```
+
+如果 Claude Code 访问外网也必须经过公司代理，把代理写在同一文件中，systemd 才能继承：
+
+```ini
+HTTP_PROXY=http://代理主机:8080
+HTTPS_PROXY=http://代理主机:8080
+NO_PROXY=127.0.0.1,localhost
+NODE_EXTRA_CA_CERTS=/etc/pki/trust/anchors/company-root-ca.crt
+```
+
+优先配置公司根证书，不要长期关闭 TLS 校验。网页登录采用 HTTP Basic Auth；若端口会经过不可信网络，请在前面配置 HTTPS 反向代理，或只监听 `127.0.0.1` 并使用 SSH 隧道。
+
+随后重启：
+
+```bash
+sudo systemctl restart schema-atlas
+```
+
+界面中填写的代码仓库、标注 JSON 或文档路径必须位于这些根目录内，同时 `claude` 用户需要读取权限。例如：
+
+```bash
+sudo setfacl -R -m u:claude:rX /data/domain-docs
+```
+
+## 5. 不安装 systemd 的临时运行方式
+
+用 `claude` 用户执行：
+
+```bash
+npm run start:local
+```
+
+未配置网页登录凭据时，临时方式只监听 `127.0.0.1`。从另一台电脑访问可建立 SSH 隧道：
+
+```bash
+ssh -L 3000:127.0.0.1:3000 用户名@服务器IP
+```
+
+然后打开 `http://127.0.0.1:3000`。
+
+需要关闭 SSH 后继续运行时：
+
+```bash
+nohup npm run start:local > schema-atlas.log 2>&1 < /dev/null &
+echo $! > schema-atlas.pid
+```
+
+## 6. 更新版本
+
+更新源码后执行：
+
+```bash
+npm ci --no-audit --no-fund
+npm run build
+sudo systemctl restart schema-atlas
+```
+
+`.schema-atlas-ai/` 不会被 Git 或构建覆盖，其中包含 Schema Atlas 创建的 Claude Code Session 索引和完整对话记录。
+
+## 7. 常见问题
+
+### 界面显示“本地 AI 服务不可用”
+
+```bash
+systemctl status schema-atlas
+journalctl -u schema-atlas -n 100 --no-pager
+sudo -iu claude claude --version
+sudo -iu claude claude auth status
+```
+
+### systemd 找不到 NVM 中的 Node.js
+
+重新运行安装脚本即可。脚本会把确定后的绝对路径写入服务，而不是依赖 `.bashrc`。
+
+### 参考路径被拒绝
+
+确认该路径位于 `SCHEMA_ATLAS_REFERENCE_ROOTS` 之一，并且 `claude` 用户能够读取。服务会解析真实路径，因此软链接也不能绕过根目录限制。
+
+### `--dangerously-skip-permissions`
+
+Schema Atlas 创建的每轮 Claude Code 命令默认携带此参数。它不会提升 Linux 用户权限，但 Claude Code可以操作 `claude` 用户本身有权访问的内容，因此只应配置可信参考目录。

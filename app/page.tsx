@@ -35,6 +35,7 @@ import {
   Plus,
   Settings2,
   Search,
+  Sparkles,
   Table2,
   Trash2,
   Upload,
@@ -82,6 +83,9 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 
+import { AiPanel } from "./ai-panel";
+import type { AiSession, AiTableDraft } from "./ai-types";
+import { mergeAiDraftIntoTable } from "./ai-utils";
 import {
   Column,
   ColumnAnnotation,
@@ -1173,6 +1177,7 @@ function InspectorSheet({
   onDelete,
   onEditField,
   onEditTable,
+  onOpenAi,
   onExportChanges,
 }: {
   inspector: Inspector;
@@ -1185,6 +1190,7 @@ function InspectorSheet({
   onDelete: (tableName: string) => void;
   onEditField: (tableName: string, fieldName: string) => void;
   onEditTable: (tableName: string) => void;
+  onOpenAi: (tableName: string) => void;
   onExportChanges: (tableName: string) => void;
 }) {
   const tableIndex = useMemo(() => new Map(tables.map((table) => [table.tableName, table])), [tables]);
@@ -1219,6 +1225,7 @@ function InspectorSheet({
         </div>
         <div className="class-summary"><div><span>对应类</span><code>{selectedTable.className}</code></div><button onClick={() => onEditTable(selectedTable.tableName)}><Settings2 size={14} />配置类</button></div>
         <div className="inspector-actions">
+          <Button variant="outline" className="ai-from-sheet" onClick={() => onOpenAi(selectedTable.tableName)}><Sparkles size={15} />AI 审核此表</Button>
           <Button className="focus-from-sheet" onClick={() => onFocus(selectedTable.tableName)}><Focus size={15} />聚焦该表关系</Button>
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
         </div>
@@ -1372,6 +1379,8 @@ export default function Home() {
   const [fieldTarget, setFieldTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
   const [fieldDeleteTarget, setFieldDeleteTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
   const [tableConfigTarget, setTableConfigTarget] = useState<string | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTableTarget, setAiTableTarget] = useState<string | null>(null);
   const [tableConfigError, setTableConfigError] = useState("");
   const [renameTarget, setRenameTarget] = useState<
     | { level: 0; currentName: string }
@@ -1624,6 +1633,37 @@ export default function Home() {
     toast.success("类信息已保存");
   };
 
+  const applyAiDraft = (draft: AiTableDraft, session: AiSession) => {
+    const table = tables.find((item) => item.tableName === draft.tableName);
+    if (!table) throw new Error(`表 ${draft.tableName} 已不存在，无法应用草稿`);
+    const duplicate = tables.find((item) => item.tableName !== table.tableName && item.className.toLowerCase() === draft.className.trim().toLowerCase());
+    if (duplicate) throw new Error(`类名 ${draft.className} 已被 ${duplicate.tableName} 使用`);
+    const next = mergeAiDraftIntoTable(table, draft);
+    const before = {
+      className: table.className,
+      classDescription: table.classDescription,
+      classAliases: table.classAliases,
+      annotations: Object.fromEntries(table.columns.map((column) => [column.name, migrateColumn(column).annotation])),
+    };
+    const after = {
+      className: next.className,
+      classDescription: next.classDescription,
+      classAliases: next.classAliases,
+      annotations: Object.fromEntries(next.columns.map((column) => [column.name, migrateColumn(column).annotation])),
+    };
+    setTables((current) => current.map((item) => item.tableName === next.tableName ? next : item));
+    addChanges([{
+      action: "apply_ai_draft",
+      label: `应用 Claude Code 标注草稿`,
+      tableName: next.tableName,
+      tableSnapshot: makeTableAuditSnapshot(next),
+      source: "claude-code",
+      sessionId: session.id,
+      before,
+      after,
+    }]);
+  };
+
   const renameDomain = (newName: string) => {
     if (!renameTarget) return;
     if (renameTarget.level === 0) {
@@ -1705,6 +1745,7 @@ export default function Home() {
         </div>
         <div className="workspace-actions">
           <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域{fieldGapCount > 0 && <><span /><strong className="quality-alert"><CircleAlert size={12} />{fieldGapCount} 字段缺口</strong></>}</div>
+          <Button variant="outline" className="ai-toolbar-button" onClick={() => { setAiTableTarget(null); setAiOpen(true); }}><Sparkles size={16} />AI 标注</Button>
           <Button variant="outline" onClick={exportAnnotations}><FileArchive size={16} />导出标注</Button>
           <Button onClick={() => setImportOpen(true)}><Plus size={16} />导入 JSON</Button>
         </div>
@@ -1734,8 +1775,10 @@ export default function Home() {
       onDelete={(tableName) => setDeleteTargets([tableName])}
       onEditField={(tableName, fieldName) => setFieldTarget({ tableName, fieldName })}
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
+      onOpenAi={(tableName) => { setInspector(null); setAiTableTarget(tableName); setAiOpen(true); }}
       onExportChanges={exportTableAudit}
     />
+    <AiPanel open={aiOpen} onOpenChange={setAiOpen} tables={tables} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onApplyDraft={applyAiDraft} />
     <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
     <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
       <AlertDialogContent className="delete-dialog"><AlertDialogHeader><div className="delete-dialog-mark"><Trash2 size={20} /></div><AlertDialogTitle>删除字段 {fieldDeleteTarget?.fieldName}？</AlertDialogTitle><AlertDialogDescription>该字段会从 {fieldDeleteTarget?.tableName} 移除，并清理 {deleteFieldRelations} 条关系中的对应列映射。删除前内容会写入变更记录。</AlertDialogDescription></AlertDialogHeader><div className="delete-table-preview"><code>{fieldDeleteTarget?.tableName}.{fieldDeleteTarget?.fieldName}</code><span>{deleteFieldColumn?.description || "暂无字段说明"}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setFieldDeleteTarget(null)}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={deleteField}><Trash2 size={14} />确认删除字段</AlertDialogAction></AlertDialogFooter></AlertDialogContent>

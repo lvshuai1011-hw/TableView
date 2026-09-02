@@ -35,8 +35,12 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /.sites-runtime/
 /outputs/
 /work/
+/.schema-atlas-ai/
+schema-atlas.log
+schema-atlas.pid

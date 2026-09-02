@@ -17,36 +17,46 @@ Schema Atlas 用于批量导入 PDM JSON 表定义，并从全局业务域逐层
 - 字段筛选、属性名、别名、详细描述、语义标志和枚举标注
 - 表/字段删除、外键映射同步清理和可导出的变更记录
 - 按约定目录导出 Ontology、RDB Mapping 和枚举 JSON 的 ZIP
-- 浏览器本地持久化；刷新页面后保留表、标注和变更记录
+- 本地 Claude Code CLI 批量生成全表标注草稿，不使用 SDK 或 RAG
+- 表级 AI 审核对话、人工澄清 TODO 和可恢复的 Session 中心
+- 导入表与人工标注保存在浏览器；AI Session、草稿和完整对话保存在服务器
 
 ## 快速部署
 
-要求 Node.js `22.13.0` 或更高版本、npm `10` 或更高版本。
+要求 Node.js `22.13.0` 或更高版本、npm `10` 或更高版本，并确保非 root 用户 `claude` 已安装并登录 Claude Code。
 
 ```bash
 npm ci
 npm run build
-
-nohup npm run start -- --hostname 0.0.0.0 --port 3000 \
-  > schema-atlas.log 2>&1 < /dev/null &
-echo $! > schema-atlas.pid
+sudo bash scripts/install-systemd.sh
 ```
 
-访问：`http://服务器IP:3000`
+访问：`http://服务器IP:3000`。安装命令会打印网页登录用户名和随机密码。
 
-查看日志：
+查看服务和日志：
 
 ```bash
-tail -f schema-atlas.log
+systemctl status schema-atlas
+journalctl -u schema-atlas -f
 ```
 
-停止服务：
+不安装 systemd 时，可以前台启动完整服务：
 
 ```bash
-kill "$(cat schema-atlas.pid)"
+npm run start:local
 ```
 
-完整安装与 Nginx 配置见 [INSTALL.md](./INSTALL.md)。
+完整安装和参考资料目录配置见 [INSTALL.md](./INSTALL.md)。
+
+## Claude Code 标注流程
+
+1. 顶部点击“AI 标注”，选择全部域或一个 0级域，配置本地代码仓库、历史标注 JSON 等参考路径。
+2. 系统为每张表创建独立 Claude Code Session，使用 `--dangerously-skip-permissions` 执行，并把结果保存在草稿层。
+3. Claude Code 无法确定的概念进入人工 TODO；填写答案后，系统恢复原 Session 继续修订。
+4. 在表详情点击“AI 审核此表”，查看完整对话、低置信字段和草稿摘要，也可以继续对话纠正。
+5. 人工确认并应用后，正式标注才会变化，同时写入该表自己的变更记录。
+
+Session 由 Schema Atlas 生成 UUID 并登记，前端不会混入用户在其他目录手工创建的 Claude Code 会话。服务器只把允许根目录中的路径传给 `--add-dir`，Claude Code直接读取文件，不建立向量索引。
 
 ## 关系方向
 
@@ -239,10 +249,13 @@ npm ci --cache ./npm-cache --offline
 - `app/data.ts`：数据类型及 `PE_PLAN_POLICY` 示例
 - `app/schema-utils.ts`：数据迁移、导出格式校验和 ZIP 生成
 - `app/editor-dialogs.tsx`：类、字段、枚举、域和变更记录编辑界面
+- `app/ai-panel.tsx`：批量生成、表级审核、Session 与 TODO 工作台
+- `local-ai/`：本地 Claude Code 进程、持久化 API 和单端口服务
+- `scripts/install-systemd.sh`：非 root 后台服务安装脚本
 - `app/globals.css`：工作台与关系画布样式
 - `components/ui/`：界面基础组件
 - `public/`：站点图标与静态资源
 
 ## 数据存储
 
-导入结果、字段标注和变更记录保存在当前浏览器的 `localStorage` 中，不需要服务端数据库。变更历史使用表名分桶保存。它适合单机使用；清除浏览器站点数据会同时清除这些内容。需要迁移前，请逐表导出重要记录和标注 ZIP。多人共享或集中管理时，应接入数据库或后端存储。
+导入结果、字段标注和变更记录保存在当前浏览器的 `localStorage` 中；AI Session、草稿、执行记录和 TODO 保存在服务端 `.schema-atlas-ai/`。变更历史使用表名分桶保存。它适合单机使用；清除浏览器站点数据会同时清除正式标注和表级历史。需要迁移前，请逐表导出重要记录和标注 ZIP。多人共享或集中管理时，应接入数据库或后端存储。

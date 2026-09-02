@@ -260,6 +260,48 @@ test("reports missing relationship fields separately from excluded export fields
   assert.equal(countRelationshipFieldGaps([excluded], tables), 0);
 });
 
+test("applies an AI draft without mutating the imported table structure", async () => {
+  const { mergeAiDraftIntoTable, summarizeAiDraft } = await vite.ssrLoadModule("/app/ai-utils.ts");
+  const { migrateTables } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const [source] = migrateTables([{
+    tableName: "PE_FREE_UNIT",
+    description: "免费资源实例",
+    folder: "免费资源",
+    domain0: "FreeUnit",
+    domain1: "免费资源",
+    columns: [
+      { name: "FREE_UNIT_ID", description: "标识", dataType: "NUMBER(20)", length: "20", isPrimaryKey: true, nullable: false, remark: "" },
+      { name: "ORIGIN_TYPE", description: "来源类型", dataType: "VARCHAR2(1)", length: "1", isPrimaryKey: false, nullable: false, remark: "" },
+    ],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+  const draft = {
+    tableName: "PE_FREE_UNIT",
+    className: "FreeUnitInstance",
+    classDescription: "免费资源实例的本体类",
+    classAliases: ["赠送实例"],
+    confidence: "high",
+    columns: source.columns.map((column) => ({
+      ...column.annotation,
+      name: column.name,
+      entityColumn: column.name === "FREE_UNIT_ID" ? "freeUnitInstanceID" : "originType",
+      isLocalId: column.name === "FREE_UNIT_ID",
+      isCode: column.name === "ORIGIN_TYPE",
+      confidence: "high",
+      reason: "测试草稿",
+    })),
+  };
+  const summary = summarizeAiDraft(source, draft);
+  const merged = mergeAiDraftIntoTable(source, draft);
+  assert.equal(summary.changedFields, 2);
+  assert.equal(source.className, "FreeUnit");
+  assert.equal(merged.className, "FreeUnitInstance");
+  assert.equal(merged.columns[0].annotation.isLocalId, true);
+  assert.equal(merged.columns[1].annotation.isCode, true);
+  assert.deepEqual(merged.columns.map((column) => column.name), source.columns.map((column) => column.name));
+});
+
 test("keeps history accessible only through each affected table", async () => {
   const {
     appendChangeRecords,

@@ -194,6 +194,7 @@ function actionLabel(action: ChangeRecord["action"]) {
     delete_table: "删除表",
     delete_field: "删除字段",
     update_field: "更新字段标注",
+    apply_ai_draft: "应用 AI 草稿",
     update_class_name: "更新类信息",
     update_relationship: "更新外键关系",
     rename_domain0: "修改 0级域",
@@ -203,8 +204,9 @@ function actionLabel(action: ChangeRecord["action"]) {
 
 export function ChangeRecordList({ records, emptyText = "暂时没有变更记录" }: { records: ChangeRecord[]; emptyText?: string }) {
   return <div className="change-record-list">{records.map((record) => <article key={record.id}>
-    <div><Badge variant="outline">{actionLabel(record.action)}</Badge><time>{new Date(record.timestamp).toLocaleString("zh-CN", { hour12: false })}</time></div>
+    <div><Badge variant="outline">{actionLabel(record.action)}</Badge>{record.source === "claude-code" && <Badge variant="outline">Claude Code</Badge>}<time>{new Date(record.timestamp).toLocaleString("zh-CN", { hour12: false })}</time></div>
     <strong>{record.label}</strong>
     {(record.tableName || record.fieldName) && <code>{[record.tableName, record.fieldName].filter(Boolean).join(".")}</code>}
+    {record.sessionId && <small>Session · {record.sessionId.slice(0, 8)}</small>}
   </article>)}{records.length === 0 && <div className="audit-empty">{emptyText}</div>}</div>;
 }

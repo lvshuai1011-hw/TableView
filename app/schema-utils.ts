@@ -419,6 +419,7 @@ export type ChangeAction =
   | "delete_table"
   | "delete_field"
   | "update_field"
+  | "apply_ai_draft"
   | "update_class_name"
   | "update_relationship"
   | "rename_domain0"
@@ -439,6 +440,8 @@ export type ChangeRecord = {
   label: string;
   tableName: string;
   fieldName?: string;
+  source?: "user" | "claude-code";
+  sessionId?: string;
   tableSnapshot?: TableAuditSnapshot;
   before?: unknown;
   after?: unknown;
@@ -486,6 +489,7 @@ const CHANGE_ACTIONS = new Set<ChangeAction>([
   "delete_table",
   "delete_field",
   "update_field",
+  "apply_ai_draft",
   "update_class_name",
   "update_relationship",
   "rename_domain0",
@@ -530,6 +534,8 @@ function migrateChangeRecord(
     label: typeof source.label === "string" && source.label ? source.label : "历史变更",
     tableName,
     tableSnapshot,
+    ...(source.source === "claude-code" ? { source: "claude-code" as const } : {}),
+    ...(typeof source.sessionId === "string" && source.sessionId ? { sessionId: source.sessionId } : {}),
     ...(typeof source.fieldName === "string" && source.fieldName ? { fieldName: source.fieldName } : {}),
     ...(Object.prototype.hasOwnProperty.call(source, "before") ? { before: source.before } : {}),
     ...(Object.prototype.hasOwnProperty.call(source, "after") ? { after: source.after } : {}),
