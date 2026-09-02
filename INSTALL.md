@@ -76,7 +76,7 @@ server {
 
 ## 5. JSON 导入规则
 
-每个 JSON 文件代表一张表，必须包含：
+系统导入的是已经清理和标准化后的表结构 JSON。每个 JSON 文件代表一张表，必须包含：
 
 - `tableName`
 - `description`
@@ -91,7 +91,7 @@ server {
 
 导入和删除结果保存在当前浏览器的 `localStorage` 中，没有服务端数据库，也不需要环境变量。刷新页面后数据仍会保留；清除该站点的浏览器数据会同时清空表数据。
 
-当前方式适合单机使用。团队共享时建议接入 SQLite / PostgreSQL，或将原始 JSON 保存到对象存储后由服务端生成关系索引。
+当前方式适合单机使用。团队共享时建议接入 SQLite / PostgreSQL，或将清理后的 JSON 保存到对象存储后由服务端生成关系索引。
 
 ## 7. 常用命令
 
@@ -151,6 +151,10 @@ sidecar 调用 Claude Code 时默认固定使用：
 
 该目录已经加入 `.gitignore`。
 
+### AI 输入事实边界
+
+浏览器中已经导入并清理好的 Schema JSON 是表结构的唯一事实来源。Claude Code 可以读取代码仓库、已审核 JSON、业务规范等参考资料来理解业务概念和学习标注方式，但不能根据参考资料反向修改表名、字段名、数据库类型或表关系，也不需要知道这些 JSON 最初来自什么建模工具。
+
 ### Session 浏览与继续纠正
 
 Claude Code 本地 session transcript 直接读取自：
@@ -169,7 +173,7 @@ Claude Code 本地 session transcript 直接读取自：
 
 ### AI 标注流程
 
-1. 导入全部 PDM JSON。
+1. 导入全部清理后的 Schema JSON。
 2. 在 AI 面板设置本地代码仓库、已审核 JSON、规范资料等参考目录。
 3. 点击“AI 生成全部标注”。
 4. Claude Code 主动读取这些目录并生成类和字段标注 Proposal。
