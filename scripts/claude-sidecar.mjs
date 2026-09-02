@@ -14,6 +14,8 @@ const CLAUDE_HOME = resolve(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".c
 const SESSION_ROOT = join(CLAUDE_HOME, "projects");
 const MAX_BODY_BYTES = 80 * 1024 * 1024;
 const MAX_STDIO_BYTES = 120 * 1024 * 1024;
+const MAX_BATCH_FIELDS = Math.max(20, Number(process.env.CLAUDE_ANNOTATION_BATCH_FIELDS || 180));
+const MAX_BATCH_TABLES = Math.max(1, Number(process.env.CLAUDE_ANNOTATION_BATCH_TABLES || 24));
 
 const annotationProperties = {
   included: { type: "boolean" },
@@ -212,6 +214,8 @@ async function claudeHealth() {
     sessionRoot: SESSION_ROOT,
     permissionMode: "--dangerously-skip-permissions",
     runningAsRoot: typeof process.getuid === "function" ? process.getuid() === 0 : false,
+    batchFields: MAX_BATCH_FIELDS,
+    batchTables: MAX_BATCH_TABLES,
   };
 }
 
@@ -356,24 +360,48 @@ async function readSessionDetail(sessionId) {
   return { ...summary, messages };
 }
 
-function buildPrompt({ mode, inputPath, message, clarificationAnswers, referenceDirs }) {
+function batchTables(tables) {
+  const batches = [];
+  let batch = [];
+  let fieldCount = 0;
+  for (const table of tables) {
+    const tableFields = Array.isArray(table.columns) ? table.columns.length : 0;
+    const exceeds = batch.length > 0 && (batch.length >= MAX_BATCH_TABLES || fieldCount + tableFields > MAX_BATCH_FIELDS);
+    if (exceeds) {
+      batches.push(batch);
+      batch = [];
+      fieldCount = 0;
+    }
+    batch.push(table);
+    fieldCount += tableFields;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+function buildPrompt({ mode, inputPath, targetPath, message, clarificationAnswers, referenceDirs, batchIndex, batchCount }) {
+  const batchInstruction = targetPath
+    ? `本轮是全量生成的第 ${batchIndex + 1}/${batchCount} 批。目标表清单文件：${targetPath}。只为该清单中的表输出 tablePatches，但可以读取完整 Schema JSON 来理解跨表关系。目标表中的每个字段都必须有明确标注或进入 clarification，不能漏字段。`
+    : "本轮没有目标表限制；只修改与本轮人工澄清或纠正直接相关的标注。";
   const modeInstruction = mode === "generate-all"
-    ? "为输入中的所有表和所有字段生成完整第一版标注。不要只做样例。遇到无法可靠判断的业务概念时，创建 clarification TODO，同时对能确定的部分继续完成。"
+    ? "目标是最终得到全部表、全部字段的完整第一版标注。不要只做样例。遇到无法可靠判断的业务概念时，创建 clarification TODO，同时完成所有能确定的部分。"
     : mode === "clarify"
-      ? "这是人工澄清后的继续生成。吸收澄清答案，重新检查受影响的表和字段，并返回需要更新的 proposal。不要机械地只改一个字段；要检查相同概念的相关字段。"
-      : "这是人工审核过程中的交互纠正。根据用户消息和既有 session 上下文调查参考资料，返回结构化修改 proposal；没有必要修改的字段不要制造变更。";
+      ? "这是人工澄清后的继续生成。吸收澄清答案，重新检查受影响的表和字段，并返回需要更新的 proposal。保留仍然未解决的 clarification；已经被回答并解决的问题不要重复创建。不要机械地只改一个字段，要检查相同概念的相关字段。"
+      : "这是人工审核过程中的交互纠正。根据用户消息和既有 session 上下文调查参考资料，返回结构化修改 proposal；没有必要修改的字段不要制造变更。如果纠正暴露了新的不确定概念，把它加入 clarification。";
 
   return [
     "你是 Schema Atlas 的本地 Claude Code 标注 Agent。",
     "你运行在用户机器上的 Claude Code CLI 中，可以主动使用 Read/Grep/Glob/Bash 等工具调查本地资料。",
     "输入中的 tables 是用户已经清理、标准化后的 Schema JSON，是当前表结构、字段、类型和关系的唯一结构事实。不要假设或反推它来自某种建模工具，也不要用参考资料改变这些结构事实。",
-    "本次任务只生成类与字段的语义标注 proposal。禁止修改 Schema Atlas 源代码、输入快照和参考资料文件。",
-    `Schema JSON 输入快照：${inputPath}`,
+    "本次任务只生成类与字段的语义标注 proposal。禁止修改 Schema Atlas 源代码、Schema JSON 输入快照和参考资料文件。",
+    `完整 Schema JSON 输入快照：${inputPath}`,
+    targetPath ? `本批目标表清单：${targetPath}` : "",
     referenceDirs.length ? `已通过 --add-dir 授予访问的参考目录：\n${referenceDirs.map((item) => `- ${item}`).join("\n")}` : "本次未配置额外参考目录。",
     "参考资料用于理解业务语义和学习已确认的标注风格，不用于覆盖 Schema JSON 中的结构事实。",
     "调查优先级：已人工审核的标注 JSON / 明确业务规范 > 实际代码中的业务语义和使用方式 > 清理后 Schema JSON 自带的字段说明与表关系 > 单纯字段名推断。",
     "不要为了填满字段而编造业务事实。无法可靠确认的概念必须进入 clarifications，供人工逐项澄清。",
     "所有建议都只是待人工审核的 proposal，不要直接写回正式标注。",
+    batchInstruction,
     modeInstruction,
     message ? `用户本轮补充：${message}` : "",
     clarificationAnswers?.length ? `人工澄清答案：\n${clarificationAnswers.map((item) => `- ${item.id}: ${item.answer}`).join("\n")}` : "",
@@ -381,47 +409,7 @@ function buildPrompt({ mode, inputPath, message, clarificationAnswers, reference
   ].filter(Boolean).join("\n\n");
 }
 
-async function runClaudeAnnotation(body) {
-  const projectRoot = await ensureDirectory(body.projectRoot || DEFAULT_PROJECT_ROOT, "projectRoot");
-  const referenceDirs = [];
-  for (const value of Array.isArray(body.referenceDirs) ? body.referenceDirs : []) {
-    referenceDirs.push(await ensureDirectory(value, "参考资料目录"));
-  }
-  if (!Array.isArray(body.tables) || body.tables.length === 0) throw new Error("没有可供 AI 标注的 Schema JSON 数据");
-  if (!["generate-all", "clarify", "chat"].includes(body.mode)) throw new Error("mode 无效");
-
-  const jobId = randomUUID();
-  const jobDir = join(projectRoot, ".schema-atlas-ai", "jobs", jobId);
-  await mkdir(jobDir, { recursive: true });
-  const inputPath = join(jobDir, "schema.json");
-  await writeFile(inputPath, JSON.stringify({
-    generatedAt: new Date().toISOString(),
-    mode: body.mode,
-    tables: body.tables,
-    clarificationAnswers: body.clarificationAnswers || [],
-    userMessage: body.message || "",
-  }, null, 2));
-
-  const prompt = buildPrompt({
-    mode: body.mode,
-    inputPath,
-    message: typeof body.message === "string" ? body.message : "",
-    clarificationAnswers: Array.isArray(body.clarificationAnswers) ? body.clarificationAnswers : [],
-    referenceDirs,
-  });
-
-  const args = [
-    "--dangerously-skip-permissions",
-    "-p",
-    "--output-format", "json",
-    "--json-schema", JSON.stringify(proposalSchema),
-  ];
-  if (body.sessionId) args.push("--resume", String(body.sessionId));
-  else args.push("--name", `schema-atlas-${new Date().toISOString().replace(/[:.]/g, "-")}`);
-  for (const dir of referenceDirs) args.push("--add-dir", dir);
-  args.push(prompt);
-
-  const result = await runProcess("claude", args, { cwd: projectRoot });
+function parseClaudeResult(result) {
   if (result.code !== 0) {
     return {
       ok: false,
@@ -429,7 +417,6 @@ async function runClaudeAnnotation(body) {
       stderr: result.stderr.trim(),
     };
   }
-
   let envelope;
   try { envelope = JSON.parse(result.stdout); }
   catch {
@@ -450,6 +437,121 @@ async function runClaudeAnnotation(body) {
     proposal,
     stderr: result.stderr.trim() || undefined,
   };
+}
+
+async function runClaudeOnce({ projectRoot, referenceDirs, sessionId, prompt }) {
+  const args = [
+    "--dangerously-skip-permissions",
+    "-p",
+    "--output-format", "json",
+    "--json-schema", JSON.stringify(proposalSchema),
+  ];
+  if (sessionId) args.push("--resume", String(sessionId));
+  else args.push("--name", `schema-atlas-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  for (const dir of referenceDirs) args.push("--add-dir", dir);
+  args.push(prompt);
+  return parseClaudeResult(await runProcess("claude", args, { cwd: projectRoot }));
+}
+
+function mergeProposals(proposals) {
+  const tablePatches = new Map();
+  const clarifications = new Map();
+  const notes = [];
+  const summaries = [];
+  for (const proposal of proposals) {
+    if (proposal.summary) summaries.push(proposal.summary);
+    for (const note of proposal.notes || []) if (!notes.includes(note)) notes.push(note);
+    for (const clarification of proposal.clarifications || []) {
+      const key = clarification.id || `${clarification.concept}:${clarification.question}`;
+      if (!clarifications.has(key)) clarifications.set(key, clarification);
+    }
+    for (const table of proposal.tablePatches || []) tablePatches.set(table.tableName, table);
+  }
+  return {
+    summary: proposals.length <= 1 ? summaries[0] || "Claude Code 已完成标注建议。" : `Claude Code 已分 ${proposals.length} 批完成全量初稿。${summaries.length ? ` ${summaries[summaries.length - 1]}` : ""}`,
+    notes,
+    clarifications: [...clarifications.values()],
+    tablePatches: [...tablePatches.values()],
+  };
+}
+
+async function runClaudeAnnotation(body) {
+  const projectRoot = await ensureDirectory(body.projectRoot || DEFAULT_PROJECT_ROOT, "projectRoot");
+  const referenceDirs = [];
+  for (const value of Array.isArray(body.referenceDirs) ? body.referenceDirs : []) {
+    referenceDirs.push(await ensureDirectory(value, "参考资料目录"));
+  }
+  if (!Array.isArray(body.tables) || body.tables.length === 0) throw new Error("没有可供 AI 标注的 Schema JSON 数据");
+  if (!["generate-all", "clarify", "chat"].includes(body.mode)) throw new Error("mode 无效");
+
+  const jobId = randomUUID();
+  const jobDir = join(projectRoot, ".schema-atlas-ai", "jobs", jobId);
+  await mkdir(jobDir, { recursive: true });
+  const inputPath = join(jobDir, "schema.json");
+  await writeFile(inputPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    tables: body.tables,
+  }, null, 2));
+
+  if (body.mode === "generate-all") {
+    const batches = batchTables(body.tables);
+    const proposals = [];
+    let sessionId = body.sessionId ? String(body.sessionId) : "";
+    let stderr = "";
+    for (let index = 0; index < batches.length; index += 1) {
+      const targetPath = join(jobDir, `targets-${String(index + 1).padStart(3, "0")}.json`);
+      await writeFile(targetPath, JSON.stringify({
+        batch: index + 1,
+        totalBatches: batches.length,
+        tableNames: batches[index].map((table) => table.tableName),
+      }, null, 2));
+      const prompt = buildPrompt({
+        mode: body.mode,
+        inputPath,
+        targetPath,
+        message: typeof body.message === "string" ? body.message : "",
+        clarificationAnswers: [],
+        referenceDirs,
+        batchIndex: index,
+        batchCount: batches.length,
+      });
+      const result = await runClaudeOnce({ projectRoot, referenceDirs, sessionId, prompt });
+      if (!result.ok) {
+        return {
+          ...result,
+          sessionId: result.sessionId || sessionId || undefined,
+          error: `全量生成第 ${index + 1}/${batches.length} 批失败：${result.error}`,
+        };
+      }
+      sessionId = result.sessionId || sessionId;
+      if (result.stderr) stderr += `${result.stderr}\n`;
+      proposals.push(result.proposal);
+    }
+    return {
+      ok: true,
+      sessionId: sessionId || undefined,
+      proposal: mergeProposals(proposals),
+      stderr: stderr.trim() || undefined,
+      batches: batches.length,
+    };
+  }
+
+  const prompt = buildPrompt({
+    mode: body.mode,
+    inputPath,
+    targetPath: "",
+    message: typeof body.message === "string" ? body.message : "",
+    clarificationAnswers: Array.isArray(body.clarificationAnswers) ? body.clarificationAnswers : [],
+    referenceDirs,
+    batchIndex: 0,
+    batchCount: 1,
+  });
+  return runClaudeOnce({
+    projectRoot,
+    referenceDirs,
+    sessionId: body.sessionId ? String(body.sessionId) : "",
+    prompt,
+  });
 }
 
 const server = createServer(async (req, res) => {
@@ -477,5 +579,6 @@ server.listen(PORT, HOST, () => {
   console.log(`[schema-atlas] Claude Code sidecar listening on http://${HOST}:${PORT}`);
   console.log(`[schema-atlas] project root: ${DEFAULT_PROJECT_ROOT}`);
   console.log(`[schema-atlas] sessions: ${SESSION_ROOT}`);
+  console.log(`[schema-atlas] batch limits: ${MAX_BATCH_TABLES} tables / ${MAX_BATCH_FIELDS} fields`);
   console.log("[schema-atlas] Claude Code permission mode: --dangerously-skip-permissions");
 });
