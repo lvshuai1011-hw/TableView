@@ -93,7 +93,6 @@ import {
   UNCLASSIFIED,
 } from "./data";
 import {
-  AuditLogSheet,
   ChangeRecordList,
   FieldEditorDialog,
   RenameDomainDialog,
@@ -101,7 +100,7 @@ import {
 } from "./editor-dialogs";
 import {
   appendChangeRecords,
-  buildChangeHistoryExport,
+  buildTableChangeHistoryExport,
   buildExportFiles,
   CHANGE_LOG_STORAGE_KEY,
   ChangeHistoryStore,
@@ -1380,7 +1379,6 @@ export default function Home() {
     | null
   >(null);
   const [changeHistory, setChangeHistory] = useState<ChangeHistoryStore>(() => createEmptyChangeHistory());
-  const [auditOpen, setAuditOpen] = useState(false);
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
   const fieldGapCount = useMemo(() => countRelationshipFieldGaps(relationships, tables), [relationships, tables]);
   const graph = useMemo(() => buildScopeGraph(scope, tables, relationships, depth, direction), [scope, tables, relationships, depth, direction]);
@@ -1631,21 +1629,23 @@ export default function Home() {
     if (renameTarget.level === 0) {
       const before = renameTarget.currentName;
       if (!newName || newName === before) return setRenameTarget(null);
+      const affectedTables = tables.filter((table) => table.domain0 === before);
       setTables((current) => current.map((table) => table.domain0 === before ? { ...table, domain0: newName } : table));
       setScope((current) => {
         if ((current.level === "domain" || current.level === "folder") && current.domain0 === before) return { ...current, domain0: newName };
         return current;
       });
-      addChanges([{ action: "rename_domain0", label: `0级域 ${before} → ${newName}`, before, after: { domain0: newName, affectedTables: tables.filter((table) => table.domain0 === before).map((table) => table.tableName) } }]);
+      addChanges(affectedTables.map((table) => ({ action: "rename_domain0", label: `0级域 ${before} → ${newName}`, tableName: table.tableName, tableSnapshot: makeTableAuditSnapshot({ ...table, domain0: newName }), before: { domain0: before }, after: { domain0: newName } })));
     } else {
       const { domain0, currentName } = renameTarget;
       const normalized = normalizeDomain1(newName);
       if (normalized === currentName) return setRenameTarget(null);
+      const affectedTables = tables.filter((table) => table.domain0 === domain0 && table.domain1 === currentName);
       setTables((current) => current.map((table) => table.domain0 === domain0 && table.domain1 === currentName ? { ...table, domain1: normalized, folder: normalized } : table));
       setScope((current) => current.level === "folder" && current.domain0 === domain0 && current.domain1 === currentName
         ? normalized ? { level: "folder", domain0, domain1: normalized } : { level: "domain", domain0 }
         : current);
-      addChanges([{ action: "rename_domain1", label: `1级域 ${currentName} → ${normalized || "无"}`, before: { domain0, domain1: currentName }, after: { domain0, domain1: normalized, affectedTables: tables.filter((table) => table.domain0 === domain0 && table.domain1 === currentName).map((table) => table.tableName) } }]);
+      addChanges(affectedTables.map((table) => ({ action: "rename_domain1", label: `1级域 ${currentName} → ${normalized || "无"}`, tableName: table.tableName, tableSnapshot: makeTableAuditSnapshot({ ...table, domain1: normalized, folder: normalized }), before: { domain0, domain1: currentName }, after: { domain0, domain1: normalized } })));
     }
     setRenameTarget(null);
     setCamera({ x: 0, y: 0, scale: 1 });
@@ -1669,11 +1669,10 @@ export default function Home() {
     downloadBlob(new Blob([buffer], { type: "application/zip" }), `schema-atlas-annotations-${new Date().toISOString().slice(0, 10)}.zip`);
     toast.success(`已导出 ${files.length} 个 JSON 文件`, { description: "包含 ontologies、rdb-mapping 及枚举目录。" });
   };
-  const exportAudit = () => downloadBlob(new Blob([JSON.stringify(buildChangeHistoryExport(changeHistory), null, 2)], { type: "application/json" }), `schema-atlas-change-log-${new Date().toISOString().slice(0, 10)}.json`);
   const exportTableAudit = (tableName: string) => {
-    const group = buildChangeHistoryExport(changeHistory).tables.find((item) => item.table.tableName === tableName);
+    const group = buildTableChangeHistoryExport(changeHistory, tableName);
     if (!group) return toast.error("这张表还没有变更记录");
-    downloadBlob(new Blob([JSON.stringify({ schemaVersion: 2, ...group }, null, 2)], { type: "application/json" }), `${tableName}-change-log-${new Date().toISOString().slice(0, 10)}.json`);
+    downloadBlob(new Blob([JSON.stringify(group, null, 2)], { type: "application/json" }), `${tableName}-change-log-${new Date().toISOString().slice(0, 10)}.json`);
   };
 
   const deleteFieldColumn = fieldDeleteTarget
@@ -1706,7 +1705,6 @@ export default function Home() {
         </div>
         <div className="workspace-actions">
           <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域{fieldGapCount > 0 && <><span /><strong className="quality-alert"><CircleAlert size={12} />{fieldGapCount} 字段缺口</strong></>}</div>
-          <Button variant="outline" onClick={() => setAuditOpen(true)}><FilePenLine size={16} />变更记录</Button>
           <Button variant="outline" onClick={exportAnnotations}><FileArchive size={16} />导出标注</Button>
           <Button onClick={() => setImportOpen(true)}><Plus size={16} />导入 JSON</Button>
         </div>
@@ -1746,7 +1744,6 @@ export default function Home() {
     <FieldEditorDialog open={Boolean(fieldTarget && selectedFieldTable && selectedField)} table={selectedFieldTable} column={selectedField} onOpenChange={(open) => { if (!open) setFieldTarget(null); }} onSave={saveFieldAnnotation} onDelete={() => { if (fieldTarget) setFieldDeleteTarget(fieldTarget); setFieldTarget(null); }} />
     <TableConfigDialog open={Boolean(tableConfigTarget && selectedConfigTable)} table={selectedConfigTable} error={tableConfigError} onOpenChange={(open) => { if (!open) { setTableConfigTarget(null); setTableConfigError(""); } }} onSave={saveTableConfig} />
     <RenameDomainDialog open={Boolean(renameTarget)} level={renameTarget?.level ?? 0} currentName={renameTarget?.currentName ?? ""} onOpenChange={(open) => { if (!open) setRenameTarget(null); }} onSave={renameDomain} />
-    <AuditLogSheet open={auditOpen} history={changeHistory} tables={tables} onOpenChange={setAuditOpen} onDownload={exportAudit} />
     <Toaster position="bottom-right" />
   </main>;
 }

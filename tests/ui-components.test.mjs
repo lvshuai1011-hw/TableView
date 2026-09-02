@@ -260,10 +260,10 @@ test("reports missing relationship fields separately from excluded export fields
   assert.equal(countRelationshipFieldGaps([excluded], tables), 0);
 });
 
-test("stores table history independently and migrates the legacy flat log", async () => {
+test("keeps history accessible only through each affected table", async () => {
   const {
     appendChangeRecords,
-    buildChangeHistoryExport,
+    buildTableChangeHistoryExport,
     makeTableAuditSnapshot,
     migrateChangeHistory,
     migrateTables,
@@ -289,12 +289,13 @@ test("stores table history independently and migrates the legacy flat log", asyn
     timestamp: "2026-01-02T00:00:00.000Z",
     action: "rename_domain0",
     label: "0级域 Old → Demo",
+    before: "Old",
+    after: "Demo",
   }];
 
   const migrated = migrateChangeHistory(legacy, tables);
-  assert.equal(migrated.tables.TABLE_A.length, 1);
-  assert.equal(migrated.tables.TABLE_B.length, 1);
-  assert.equal(migrated.system.length, 1);
+  assert.equal(migrated.tables.TABLE_A.length, 2);
+  assert.equal(migrated.tables.TABLE_B.length, 2);
   assert.equal(migrated.tables.TABLE_A[0].tableSnapshot.className, tables[0].className);
 
   const restored = migrateChangeHistory(JSON.parse(JSON.stringify(migrated)), tables);
@@ -309,13 +310,15 @@ test("stores table history independently and migrates the legacy flat log", asyn
   }, {
     action: "rename_domain1",
     label: "1级域 A → B",
+    tableName: "TABLE_A",
+    tableSnapshot: makeTableAuditSnapshot(tables[0]),
   }]);
-  assert.equal(history.tables.TABLE_A.length, 2);
-  assert.equal(history.tables.TABLE_B.length, 1);
-  assert.equal(history.system.length, 2);
+  assert.equal(history.tables.TABLE_A.length, 4);
+  assert.equal(history.tables.TABLE_B.length, 2);
 
-  const exported = buildChangeHistoryExport(history);
+  const exported = buildTableChangeHistoryExport(history, "TABLE_A");
   assert.equal(exported.schemaVersion, 2);
-  assert.deepEqual(exported.tables.map((group) => group.table.tableName).sort(), ["TABLE_A", "TABLE_B"]);
-  assert.equal(exported.systemChanges.length, 2);
+  assert.equal(exported.table.tableName, "TABLE_A");
+  assert.equal(exported.changes.length, 4);
+  assert.equal(buildTableChangeHistoryExport(history, "TABLE_UNKNOWN"), undefined);
 });

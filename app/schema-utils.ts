@@ -437,7 +437,7 @@ export type ChangeRecord = {
   timestamp: string;
   action: ChangeAction;
   label: string;
-  tableName?: string;
+  tableName: string;
   fieldName?: string;
   tableSnapshot?: TableAuditSnapshot;
   before?: unknown;
@@ -449,11 +449,10 @@ export type ChangeRecordDraft = Omit<ChangeRecord, "id" | "timestamp">;
 export type ChangeHistoryStore = {
   version: 2;
   tables: Record<string, ChangeRecord[]>;
-  system: ChangeRecord[];
 };
 
 export function createEmptyChangeHistory(): ChangeHistoryStore {
-  return { version: 2, tables: {}, system: [] };
+  return { version: 2, tables: {} };
 }
 
 export function makeTableAuditSnapshot(table: SchemaTable): TableAuditSnapshot {
@@ -475,13 +474,11 @@ export function makeChangeRecord(record: ChangeRecordDraft): ChangeRecord {
 
 export function appendChangeRecords(history: ChangeHistoryStore, drafts: ChangeRecordDraft[]): ChangeHistoryStore {
   const tables = Object.fromEntries(Object.entries(history.tables).map(([tableName, records]) => [tableName, [...records]]));
-  let system = [...history.system];
   drafts.forEach((draft) => {
     const record = makeChangeRecord(draft);
-    if (record.tableName) tables[record.tableName] = [record, ...(tables[record.tableName] ?? [])].slice(0, 1000);
-    else system = [record, ...system].slice(0, 2000);
+    tables[record.tableName] = [record, ...(tables[record.tableName] ?? [])].slice(0, 1000);
   });
-  return { version: 2, tables, system };
+  return { version: 2, tables };
 }
 
 const CHANGE_ACTIONS = new Set<ChangeAction>([
@@ -516,26 +513,23 @@ function migrateChangeRecord(
   tableIndex: Map<string, SchemaTable>,
   salt: string,
   tableNameOverride?: string,
-  forceSystem = false,
 ): ChangeRecord | undefined {
   const source = objectValue(value);
   if (!source || typeof source.action !== "string" || !CHANGE_ACTIONS.has(source.action as ChangeAction)) return undefined;
-  const tableName = forceSystem
-    ? undefined
-    : tableNameOverride || (typeof source.tableName === "string" && source.tableName.trim() ? source.tableName.trim() : undefined);
+  const tableName = tableNameOverride || (typeof source.tableName === "string" && source.tableName.trim() ? source.tableName.trim() : undefined);
+  if (!tableName) return undefined;
   const timestamp = typeof source.timestamp === "string" && source.timestamp ? source.timestamp : new Date().toISOString();
-  const table = tableName ? tableIndex.get(tableName) : undefined;
-  const tableSnapshot = tableName
-    ? snapshotFromUnknown(source.tableSnapshot, tableName)
-      ?? (table ? makeTableAuditSnapshot(table) : snapshotFromUnknown(source.before, tableName))
-      ?? { tableName, className: "", description: "", domain0: "", domain1: "" }
-    : undefined;
+  const table = tableIndex.get(tableName);
+  const tableSnapshot = snapshotFromUnknown(source.tableSnapshot, tableName)
+    ?? (table ? makeTableAuditSnapshot(table) : snapshotFromUnknown(source.before, tableName))
+    ?? { tableName, className: "", description: "", domain0: "", domain1: "" };
   return {
     id: typeof source.id === "string" && source.id ? `${source.id}${tableNameOverride && typeof source.tableName !== "string" ? `:${tableNameOverride}` : ""}` : `legacy-${timestamp}-${salt}`,
     timestamp,
     action: source.action as ChangeAction,
     label: typeof source.label === "string" && source.label ? source.label : "历史变更",
-    ...(tableName ? { tableName, tableSnapshot } : {}),
+    tableName,
+    tableSnapshot,
     ...(typeof source.fieldName === "string" && source.fieldName ? { fieldName: source.fieldName } : {}),
     ...(Object.prototype.hasOwnProperty.call(source, "before") ? { before: source.before } : {}),
     ...(Object.prototype.hasOwnProperty.call(source, "after") ? { after: source.after } : {}),
@@ -543,8 +537,27 @@ function migrateChangeRecord(
 }
 
 function addMigratedRecord(history: ChangeHistoryStore, record: ChangeRecord) {
-  if (record.tableName) history.tables[record.tableName] = [...(history.tables[record.tableName] ?? []), record];
-  else history.system.push(record);
+  history.tables[record.tableName] = [...(history.tables[record.tableName] ?? []), record];
+}
+
+function affectedTablesForUnscopedRecord(value: unknown, tables: SchemaTable[]) {
+  const source = objectValue(value);
+  const before = objectValue(source?.before);
+  const after = objectValue(source?.after);
+  const explicit = stringArray(after?.affectedTables);
+  if (explicit.length > 0) return explicit;
+  if (source?.action === "rename_domain0") {
+    const beforeName = typeof source.before === "string" ? source.before : typeof before?.domain0 === "string" ? before.domain0 : "";
+    const afterName = typeof source.after === "string" ? source.after : typeof after?.domain0 === "string" ? after.domain0 : "";
+    return tables.filter((table) => table.domain0 === beforeName || table.domain0 === afterName).map((table) => table.tableName);
+  }
+  if (source?.action === "rename_domain1") {
+    const domain0 = typeof after?.domain0 === "string" ? after.domain0 : typeof before?.domain0 === "string" ? before.domain0 : "";
+    const beforeName = typeof before?.domain1 === "string" ? before.domain1 : "";
+    const afterName = typeof after?.domain1 === "string" ? after.domain1 : "";
+    return tables.filter((table) => table.domain0 === domain0 && (table.domain1 === beforeName || table.domain1 === afterName)).map((table) => table.tableName);
+  }
+  return [];
 }
 
 export function migrateChangeHistory(value: unknown, tables: SchemaTable[] = []): ChangeHistoryStore {
@@ -561,9 +574,11 @@ export function migrateChangeHistory(value: unknown, tables: SchemaTable[] = [])
         if (migrated) addMigratedRecord(history, migrated);
       });
     });
-    if (Array.isArray(source.system)) source.system.forEach((record, index) => {
-      const migrated = migrateChangeRecord(record, tableIndex, `system-${index}`, undefined, true);
-      if (migrated) addMigratedRecord(history, migrated);
+    if (Array.isArray(source.system)) source.system.forEach((record, recordIndex) => {
+      affectedTablesForUnscopedRecord(record, tables).forEach((tableName, tableIndexPosition) => {
+        const migrated = migrateChangeRecord(record, tableIndex, `system-${recordIndex}-${tableIndexPosition}`, tableName);
+        if (migrated) addMigratedRecord(history, migrated);
+      });
     });
     return history;
   }
@@ -583,6 +598,10 @@ export function migrateChangeHistory(value: unknown, tables: SchemaTable[] = [])
     }
     const migrated = migrateChangeRecord(record, tableIndex, `${recordIndex}`);
     if (migrated) addMigratedRecord(history, migrated);
+    else affectedTablesForUnscopedRecord(record, tables).forEach((tableName, tableIndexPosition) => {
+      const scoped = migrateChangeRecord(record, tableIndex, `${recordIndex}-${tableIndexPosition}`, tableName);
+      if (scoped) addMigratedRecord(history, scoped);
+    });
   });
   return history;
 }
@@ -591,18 +610,13 @@ export function getTableChangeRecords(history: ChangeHistoryStore, tableName: st
   return history.tables[tableName] ?? [];
 }
 
-export function countChangeRecords(history: ChangeHistoryStore) {
-  return Object.values(history.tables).reduce((total, records) => total + records.length, 0) + history.system.length;
-}
-
-export function buildChangeHistoryExport(history: ChangeHistoryStore) {
-  const tables = Object.entries(history.tables)
-    .filter(([, records]) => records.length > 0)
-    .sort(([, left], [, right]) => (right[0]?.timestamp ?? "").localeCompare(left[0]?.timestamp ?? ""))
-    .map(([tableName, changes]) => ({
-      table: changes.find((record) => record.tableSnapshot)?.tableSnapshot ?? { tableName, className: "", description: "", domain0: "", domain1: "" },
-      deleted: changes[0]?.action === "delete_table",
-      changes,
-    }));
-  return { schemaVersion: 2, tables, systemChanges: history.system };
+export function buildTableChangeHistoryExport(history: ChangeHistoryStore, tableName: string) {
+  const changes = history.tables[tableName] ?? [];
+  if (changes.length === 0) return undefined;
+  return {
+    schemaVersion: 2,
+    table: changes.find((record) => record.tableSnapshot)?.tableSnapshot ?? { tableName, className: "", description: "", domain0: "", domain1: "" },
+    deleted: changes[0]?.action === "delete_table",
+    changes,
+  };
 }

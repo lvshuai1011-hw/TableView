@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("renders the app shell and catalog delete entry", async () => {
+test("renders the app shell without a global change-history entry", async () => {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
@@ -29,7 +29,7 @@ test("renders the app shell and catalog delete entry", async () => {
   const html = await response.text();
   assert.match(html, /<title>Schema Atlas · 表关系探索器<\/title>/);
   assert.match(html, /aria-label="删除 PE_PLAN_POLICY"/);
-  assert.match(html, />变更记录</);
+  assert.doesNotMatch(html, />变更记录</);
   assert.match(html, />导出标注</);
   assert.match(html, /我依赖谁 · 子表/);
   assert.match(html, /字段缺口/);

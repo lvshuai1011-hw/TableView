@@ -1,9 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Clock3, Download, FilePenLine, Plus, Search, Table2, Tags, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { FilePenLine, Plus, Tags, Trash2 } from "lucide-react";
 
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,13 +14,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
 import { Column, ColumnAnnotation, EnumValue, SchemaTable, SemanticRole, Sensitivity } from "./data";
-import { ChangeHistoryStore, ChangeRecord, countChangeRecords, makeTableAuditSnapshot, migrateColumn, normalizeExportType } from "./schema-utils";
+import { ChangeRecord, migrateColumn, normalizeExportType } from "./schema-utils";
 
 const SEMANTIC_ROLES: { value: SemanticRole; label: string }[] = [
   { value: "identifier", label: "标识" },
@@ -210,48 +207,4 @@ export function ChangeRecordList({ records, emptyText = "暂时没有变更记�
     <strong>{record.label}</strong>
     {(record.tableName || record.fieldName) && <code>{[record.tableName, record.fieldName].filter(Boolean).join(".")}</code>}
   </article>)}{records.length === 0 && <div className="audit-empty">{emptyText}</div>}</div>;
-}
-
-export function AuditLogSheet({ open, history, tables, onOpenChange, onDownload }: { open: boolean; history: ChangeHistoryStore; tables: SchemaTable[]; onOpenChange: (open: boolean) => void; onDownload: () => void }) {
-  const [query, setQuery] = useState("");
-  const tableIndex = useMemo(() => new Map(tables.map((table) => [table.tableName, table])), [tables]);
-  const tableGroups = useMemo(() => Object.entries(history.tables)
-    .filter(([, records]) => records.length > 0)
-    .map(([tableName, records]) => ({
-      tableName,
-      records,
-      snapshot: tableIndex.has(tableName) ? makeTableAuditSnapshot(tableIndex.get(tableName)!) : records.find((record) => record.tableSnapshot)?.tableSnapshot,
-      deleted: records[0]?.action === "delete_table",
-    }))
-    .sort((left, right) => (right.records[0]?.timestamp ?? "").localeCompare(left.records[0]?.timestamp ?? "")), [history.tables, tableIndex]);
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const filteredGroups = tableGroups.filter((group) => !normalizedQuery || [
-    group.tableName,
-    group.snapshot?.className,
-    group.snapshot?.domain0,
-    group.snapshot?.domain1,
-    ...group.records.flatMap((record) => [record.label, record.fieldName]),
-  ].filter(Boolean).some((value) => value!.toLocaleLowerCase().includes(normalizedQuery)));
-  const filteredSystem = history.system.filter((record) => !normalizedQuery || record.label.toLocaleLowerCase().includes(normalizedQuery));
-  const totalRecords = countChangeRecords(history);
-  const tableRecordCount = totalRecords - history.system.length;
-
-  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent className="audit-sheet">
-    <SheetHeader><div className="inspector-eyebrow"><Clock3 size={14} />本地审计</div><SheetTitle>变更记录</SheetTitle><SheetDescription>每张表独立保存导入、类配置、字段和关系变更；域级操作归入系统记录。</SheetDescription></SheetHeader>
-    <div className="audit-toolbar"><span>{tableGroups.length} 张表 · {tableRecordCount} 条表级记录 · {history.system.length} 条系统记录</span><Button variant="outline" size="sm" onClick={onDownload} disabled={totalRecords === 0}><Download size={14} />导出全部</Button></div>
-    <div className="audit-search"><Search size={14} /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索表、类、字段或变更内容" /></div>
-    <Tabs defaultValue="tables" className="audit-tabs">
-      <TabsList><TabsTrigger value="tables">表级历史 <span>{tableGroups.length}</span></TabsTrigger><TabsTrigger value="system">系统变更 <span>{history.system.length}</span></TabsTrigger></TabsList>
-      <TabsContent value="tables" className="audit-scroll">
-        <Accordion type="multiple" defaultValue={filteredGroups.slice(0, 1).map((group) => group.tableName)} className="audit-groups">
-          {filteredGroups.map((group) => <AccordionItem value={group.tableName} key={group.tableName}>
-            <AccordionTrigger><div className="audit-group-heading"><i><Table2 size={15} /></i><div><code>{group.tableName}</code><small>{[group.snapshot?.domain0, group.snapshot?.domain1, group.snapshot?.className].filter(Boolean).join(" · ") || "历史表"}</small></div>{group.deleted && <Badge variant="outline">已删除</Badge>}<em>{group.records.length}</em></div></AccordionTrigger>
-            <AccordionContent><ChangeRecordList records={group.records} /></AccordionContent>
-          </AccordionItem>)}
-        </Accordion>
-        {filteredGroups.length === 0 && <div className="audit-empty">没有匹配的表级记录</div>}
-      </TabsContent>
-      <TabsContent value="system" className="audit-scroll"><ChangeRecordList records={filteredSystem} emptyText="暂时没有系统变更" /></TabsContent>
-    </Tabs>
-  </SheetContent></Sheet>;
 }
