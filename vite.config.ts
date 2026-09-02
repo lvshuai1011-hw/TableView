@@ -10,6 +10,7 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const claudeSidecarPort = process.env.CLAUDE_SIDECAR_PORT || "4318";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -47,6 +48,13 @@ export default defineConfig(async () => {
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],
+      proxy: {
+        "/claude-sidecar": {
+          target: `http://127.0.0.1:${claudeSidecarPort}`,
+          changeOrigin: false,
+          rewrite: (path: string) => path.replace(/^\/claude-sidecar/, ""),
+        },
+      },
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
         : {}),
