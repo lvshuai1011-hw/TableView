@@ -53,7 +53,7 @@ sudo bash scripts/install-systemd.sh
 - 同时启动网页和 Claude Code 桥接层；
 - 只对外开放一个网页端口 `3000`；
 - 自动生成网页登录密码，保护高权限 Claude Code 接口；
-- 保存 Session、对话、草稿和 TODO 到 `.schema-atlas-ai/`；
+- 保存导入表数据集、关系索引、Session、对话、草稿和 TODO 到 `.schema-atlas-ai/`；
 - 默认允许 Claude Code读取源码目录和 `/home/claude`。
 
 访问：
@@ -118,7 +118,7 @@ sudo setfacl -R -m u:claude:rX /data/domain-docs
 
 安装后在页面打开“AI 标注 → 提示词”，可查看和修改发送给 Claude Code 的完整模板。修改自动保存在当前浏览器，下一轮单表、批量或 TODO 续写任务立即使用；“恢复默认”会重新载入仓库中的 `config/default-annotation-prompt.txt`。
 
-默认模板要求 Claude Code 先检查当前表、现有草稿和配置的参考资料。只有检索后仍没有明确依据或资料互相冲突时，才会创建待澄清项，并在界面列出已检索来源。
+默认模板要求 Claude Code 先检查当前表、后台关系索引、已导入的直接关联表、相关同域表、现有草稿和配置的参考资料。只有检索后仍没有明确依据或资料互相冲突时，才会创建待澄清项，并在界面列出已检索来源。
 
 ## 5. 不安装 systemd 的临时运行方式
 
@@ -153,7 +153,7 @@ npm run build
 sudo systemctl restart schema-atlas
 ```
 
-`.schema-atlas-ai/` 不会被 Git 或构建覆盖，其中包含 Schema Atlas 创建的 Claude Code Session 索引和完整对话记录。
+`.schema-atlas-ai/` 不会被 Git 或构建覆盖，其中包含落盘数据集、关系索引、Claude Code Session 和完整对话记录。界面“AI 标注 → 资料”显示“已落盘”后，才表示当前浏览器中的全部表已成功同步到本地服务。
 
 ## 7. 常见问题
 

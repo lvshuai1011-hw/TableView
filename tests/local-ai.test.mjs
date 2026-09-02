@@ -34,6 +34,27 @@ const table = {
   referencedBy: [],
 };
 
+const relationship = {
+  name: "Reference_6",
+  parentTable: "PE_FREE_UNIT_TYPE",
+  childTable: "PE_FREE_UNIT",
+  cardinality: "1:N",
+  cardinalityRaw: "0..*",
+  deleteConstraint: "RESTRICT",
+  updateConstraint: "RESTRICT",
+  constraintName: "",
+  columnMapping: [{ parentColumn: "FREE_UNIT_TYPE_ID", childColumn: "FREE_UNIT_TYPE_ID" }],
+};
+
+const relatedTable = {
+  ...table,
+  tableName: "PE_FREE_UNIT_TYPE",
+  className: "FreeUnitType",
+  description: "免费资源类型",
+  columns: [{ name: "FREE_UNIT_TYPE_ID", description: "免费资源类型标识", remark: "唯一标识一种免费资源" }],
+  referencedBy: [relationship],
+};
+
 test("normalizes Claude output against imported columns and creates a duplicate-name todo", () => {
   const result = normalizeStructuredOutput({
     reply: "完成",
@@ -65,15 +86,23 @@ test("builds a direct-file prompt with human clarifications", () => {
     table,
     mode: "correct",
     userMessage: "FREE_UNIT_ID 是本地标识",
+    datasetContext: {
+      datasetId: "a".repeat(64),
+      manifestPath: "/srv/schema-atlas/datasets/manifest.json",
+      relationIndexPath: "/srv/schema-atlas/datasets/relation-index.json",
+      currentTable: { path: "/srv/schema-atlas/datasets/tables/PE_FREE_UNIT.json" },
+      relatedTables: [{ tableName: "PE_FREE_UNIT_TYPE", path: "/srv/schema-atlas/datasets/tables/PE_FREE_UNIT_TYPE.json" }],
+    },
     referencePaths: [{ resolvedPath: "/srv/reference/repo" }],
     clarifications: [{ question: "是否为本地标识？", answer: "是" }],
   });
-  assert.match(prompt, /直接阅读/);
+  assert.match(prompt, /本地参考资料/);
   assert.match(prompt, /\/srv\/reference\/repo/);
   assert.match(prompt, /人工回答：是/);
   assert.match(prompt, /不能凭空增加数据库列/);
-  assert.match(prompt, /只有检索后仍没有明确依据/);
+  assert.match(prompt, /仍没有明确依据/);
   assert.match(prompt, /checkedSources/);
+  assert.match(prompt, /PE_FREE_UNIT_TYPE\.json/);
 });
 
 test("renders an editable prompt template and rejects unknown placeholders", () => {
@@ -114,6 +143,35 @@ test("keeps a durable index containing only Schema Atlas-created sessions", asyn
     assert.equal(summaries[0].source, "schema-atlas");
     assert.equal(summaries[0].claudeSessionId, session.id);
     assert.equal((await store.readSession(session.id)).tableName, "PE_FREE_UNIT");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("persists a complete dataset and resolves directly related table files", async () => {
+  const temp = await mkdtemp(path.join(projectRoot, ".schema-atlas-dataset-test-"));
+  try {
+    const store = new AtlasStore(temp);
+    await store.init();
+    const childTable = { ...table, foreignKeys: [relationship] };
+    const manifest = await store.syncDataset([childTable, relatedTable]);
+    const context = await store.readDatasetContext(manifest.id, table.tableName);
+    const parentContext = await store.readDatasetContext(manifest.id, relatedTable.tableName);
+
+    assert.equal(manifest.tableCount, 2);
+    assert.equal(manifest.relationshipCount, 1);
+    assert.deepEqual(context.relatedTables.map((entry) => entry.tableName), ["PE_FREE_UNIT_TYPE"]);
+    assert.equal(context.relationships.foreignKeys.length, 1);
+    assert.equal(parentContext.relationships.referencedBy.length, 1);
+    assert.equal(JSON.parse(await readFile(context.currentTable.path, "utf8")).tableName, "PE_FREE_UNIT");
+    assert.equal(JSON.parse(await readFile(context.relatedTables[0].path, "utf8")).columns[0].description, "免费资源类型标识");
+
+    const afterDelete = await store.syncDataset([childTable]);
+    const afterDeleteContext = await store.readDatasetContext(afterDelete.id, table.tableName);
+    assert.notEqual(afterDelete.id, manifest.id);
+    assert.equal(afterDelete.tableCount, 1);
+    assert.equal(afterDeleteContext.relatedTables.length, 0);
+    assert.equal(JSON.parse(await readFile(store.currentDatasetPath, "utf8")).datasetId, afterDelete.id);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -178,11 +236,19 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     server = await startServer();
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
+    const syncResponse = await fetch(`${origin}/api/ai/datasets/sync`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tables: [table] }),
+    });
+    assert.equal(syncResponse.status, 200);
+    const { dataset } = await syncResponse.json();
     const response = await fetch(`${origin}/api/ai/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         table,
+        datasetId: dataset.id,
         message: "生成第一版",
         referencePaths: [],
         promptTemplate: defaultPromptTemplate,
@@ -192,10 +258,16 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
     const completed = events.find((event) => event.type === "completed");
     assert.equal(completed.session.source, "schema-atlas");
+    assert.equal(completed.session.datasetId, dataset.id);
     assert.equal(completed.session.draft.className, "FreeUnitInstance");
     assert.equal(completed.session.draft.columns[0].isLocalId, true);
     const sessions = await (await fetch(`${origin}/api/ai/sessions`)).json();
     assert.equal(sessions.sessions.length, 1);
+    const datasetContext = JSON.parse(await readFile(
+      path.join(temp, "data", "sessions", `${completed.session.id}.workspace`, "dataset-context.json"),
+      "utf8",
+    ));
+    assert.equal(datasetContext.currentTable.tableName, "PE_FREE_UNIT");
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     Object.entries(previous).forEach(([key, value]) => {

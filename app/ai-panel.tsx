@@ -47,6 +47,7 @@ import DEFAULT_BATCH_INSTRUCTION_TEXT from "../config/default-batch-instruction.
 import DEFAULT_TABLE_INSTRUCTION_TEXT from "../config/default-table-instruction.txt?raw";
 import { summarizeAiDraft } from "./ai-utils";
 import type {
+  AiDataset,
   AiHealth,
   AiJob,
   AiPanelProps,
@@ -56,11 +57,11 @@ import type {
 } from "./ai-types";
 
 const REFERENCES_KEY = "schema-atlas.ai.reference-paths.v1";
-const PROMPT_KEY = "schema-atlas.ai.prompt-template.v1";
+const PROMPT_KEY = "schema-atlas.ai.prompt-template.v2";
 const BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
 const DEFAULT_BATCH_INSTRUCTION = DEFAULT_BATCH_INSTRUCTION_TEXT.trim();
 const DEFAULT_TABLE_INSTRUCTION = DEFAULT_TABLE_INSTRUCTION_TEXT.trim();
-const PROMPT_VARIABLES = ["table_name", "mode", "reference_paths", "clarifications", "user_message"];
+const PROMPT_VARIABLES = ["table_name", "mode", "dataset_context", "reference_paths", "clarifications", "user_message"];
 
 function statusLabel(status: string) {
   return ({
@@ -175,7 +176,7 @@ function SessionListItem({ session, active, onClick }: { session: AiSessionSumma
   </button>;
 }
 
-export function AiPanel({ open, onOpenChange, tables, initialTableName, onReviewTable, onApplyDraft }: AiPanelProps) {
+export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTableName, onReviewTable, onApplyDraft }: AiPanelProps) {
   const [tab, setTab] = useState("work");
   const [health, setHealth] = useState<AiHealth | null>(null);
   const [connectionError, setConnectionError] = useState("");
@@ -195,6 +196,9 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   const [promptTemplate, setPromptTemplate] = useState(DEFAULT_ANNOTATION_PROMPT.trim());
   const [batchInstruction, setBatchInstruction] = useState(DEFAULT_BATCH_INSTRUCTION);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const [dataset, setDataset] = useState<AiDataset | null>(null);
+  const [datasetSyncing, setDatasetSyncing] = useState(false);
+  const [datasetError, setDatasetError] = useState("");
   const activeTable = initialTableName ? tables.find((table) => table.tableName === initialTableName) : undefined;
   const domains = useMemo(() => [...new Set(tables.map((table) => table.domain0))].sort((a, b) => a.localeCompare(b, "zh-CN")), [tables]);
   const referencePaths = useMemo(() => referenceText.split("\n").map((item) => item.trim()).filter(Boolean), [referenceText]);
@@ -212,6 +216,26 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
       if (!silent) setLoadingSession(false);
     }
   }, []);
+
+  const syncDataset = useCallback(async () => {
+    if (!datasetReady) throw new Error("浏览器中的导入数据尚未恢复完成");
+    setDatasetSyncing(true);
+    try {
+      const value = await api<{ dataset: AiDataset }>("/api/ai/datasets/sync", {
+        method: "POST",
+        body: JSON.stringify({ tables }),
+      });
+      setDataset(value.dataset);
+      setDatasetError("");
+      return value.dataset;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "数据集同步失败";
+      setDatasetError(detail);
+      throw error;
+    } finally {
+      setDatasetSyncing(false);
+    }
+  }, [datasetReady, tables]);
 
   const refresh = useCallback(async (silent = false) => {
     try {
@@ -257,6 +281,22 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   }, [batchInstruction, preferencesReady, promptTemplate, referenceText]);
 
   useEffect(() => {
+    if (!datasetReady) return;
+    let cancelled = false;
+    let timer = 0;
+    const run = () => {
+      void syncDataset().catch(() => {
+        if (!cancelled) timer = window.setTimeout(run, 15_000);
+      });
+    };
+    timer = window.setTimeout(run, 600);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [datasetReady, syncDataset]);
+
+  useEffect(() => {
     if (!open) return;
     let active = true;
     queueMicrotask(() => {
@@ -266,6 +306,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
       setSelectedSession(null);
       setChatMessage(initialTableName ? DEFAULT_TABLE_INSTRUCTION : "");
       void refresh();
+      if (datasetReady) void syncDataset().catch(() => {});
     });
     return () => { active = false; };
   }, [open, initialTableName]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -309,12 +350,14 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
     if (!activeTable || chatBusy) return;
     const text = chatMessage.trim();
     if (!text) return;
-    setChatMessage("");
     setChatBusy(true);
     setActivity("正在启动 Claude Code…");
     try {
+      const currentDataset = await syncDataset();
+      setChatMessage("");
       await streamChat({
         table: activeTable,
+        datasetId: currentDataset.id,
         message: text,
         referencePaths,
         promptTemplate,
@@ -329,7 +372,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
       });
       await refresh(true);
     } catch (error) {
-      toast.error("Claude Code 执行失败", { description: error instanceof Error ? error.message : "未知错误" });
+      toast.error("AI 任务失败", { description: error instanceof Error ? error.message : "未知错误" });
     } finally {
       setChatBusy(false);
       setActivity("");
@@ -341,10 +384,12 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
     if (selectedTables.length === 0 || batchBusy) return;
     setBatchBusy(true);
     try {
+      const currentDataset = await syncDataset();
       const value = await api<{ job: AiJob }>("/api/ai/jobs/generate", {
         method: "POST",
         body: JSON.stringify({
           tables: selectedTables,
+          datasetId: currentDataset.id,
           referencePaths,
           promptTemplate,
           batchInstruction,
@@ -372,10 +417,11 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   const answerTodo = async (todo: AiTodo, answer: string) => {
     setAnsweringTodo(todo.id);
     try {
+      const currentDataset = await syncDataset();
       const currentTable = tables.find((table) => table.tableName === todo.tableName);
       await api(`/api/ai/todos/${todo.id}/answer`, {
         method: "POST",
-        body: JSON.stringify({ answer, table: currentTable, promptTemplate }),
+        body: JSON.stringify({ answer, table: currentTable, datasetId: currentDataset.id, promptTemplate }),
       });
       toast.success("澄清已提交", { description: "Claude Code 正在恢复原会话并修订草稿。" });
       setSelectedSessionId(todo.sessionId);
@@ -411,6 +457,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   const unknownPromptVariables = [...promptTemplate.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)]
     .map((match) => match[1])
     .filter((key, index, items) => !PROMPT_VARIABLES.includes(key) && items.indexOf(key) === index);
+  const hasDatasetContextVariable = /\{\{\s*dataset_context\s*\}\}/.test(promptTemplate);
   const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
   const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open") ?? [];
   const openTodos = todos.filter((todo) => todo.status === "open");
@@ -466,7 +513,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
 
         <TabsContent value="sessions" className="ai-tab-content ai-sessions-content">
           <div className="ai-session-list"><div className="ai-list-heading"><div><strong>Schema Atlas Sessions</strong><span>只展示本系统登记的会话</span></div><Button variant="outline" size="sm" onClick={() => refresh()}><RefreshCw size={13} />刷新</Button></div>{sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} onClick={() => selectSession(session.id)} />)}{sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}</div>
-          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span></div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}{selectedSession.activities.length > 0 && <details className="ai-activities"><summary>执行过程 · {selectedSession.activities.length}</summary>{selectedSession.activities.map((item) => <div key={item.id}><time>{shortTime(item.at)}</time><span>{item.label}</span></div>)}</details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整的人工与 Claude Code 对话过程。" />}</div>
+          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}{selectedSession.activities.length > 0 && <details className="ai-activities"><summary>执行过程 · {selectedSession.activities.length}</summary>{selectedSession.activities.map((item) => <div key={item.id}><time>{shortTime(item.at)}</time><span>{item.label}</span></div>)}</details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整的人工与 Claude Code 对话过程。" />}</div>
         </TabsContent>
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">
@@ -482,13 +529,14 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
             <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
             <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
             {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}
+            {!hasDatasetContextVariable && <div className="ai-prompt-warning"><CircleAlert size={14} />当前模板没有使用 <code>{"{{dataset_context}}"}</code>，Claude Code 将无法从提示词中获得关联表落盘路径。</div>}
             <div className="ai-prompt-footer"><span>{promptTemplate.length.toLocaleString("zh-CN")} 字符 · 修改后用于下一轮任务</span><Button variant="outline" size="sm" onClick={() => setPromptTemplate(DEFAULT_ANNOTATION_PROMPT.trim())}><RefreshCw size={13} />恢复默认</Button></div>
           </section>
         </TabsContent>
 
         <TabsContent value="settings" className="ai-tab-content ai-reference-settings">
           <section><div className="ai-section-heading"><div><FolderSearch size={18} /><span>本地参考资料</span></div><Badge variant="outline">直接读取</Badge></div><p>每行填写一个服务器本地文件或目录。Claude Code直接阅读这些路径，不建立检索库。</p><Textarea value={referenceText} onChange={(event) => setReferenceText(event.target.value)} rows={8} placeholder={"/home/claude/repos/billing\n/home/claude/annotations/ontologies"} /><small>路径会在任务启动时验证，且必须位于服务端允许的根目录内。</small></section>
-          <section className="ai-runtime-card"><div><span>运行账户</span><code>{health?.user || "未连接"}</code></div><div><span>Claude Code</span><code>{health?.version || health?.error || "未检测"}</code></div><div><span>登录状态</span><code>{health?.authenticated ? "已登录" : "未登录"}</code></div><div><span>权限模式</span><code>--dangerously-skip-permissions</code></div><div><span>允许根目录</span><div>{health?.allowedRoots?.map((root) => <code key={root}>{root}</code>) ?? <code>等待连接</code>}</div></div></section>
+          <section className="ai-runtime-card"><div><span>导入数据集</span><code>{datasetSyncing ? "正在落盘…" : dataset ? `${dataset.tableCount} 张表 · ${dataset.relationshipCount} 条关系 · 已落盘` : datasetError || "等待本地服务"}</code></div><div><span>运行账户</span><code>{health?.user || "未连接"}</code></div><div><span>Claude Code</span><code>{health?.version || health?.error || "未检测"}</code></div><div><span>登录状态</span><code>{health?.authenticated ? "已登录" : "未登录"}</code></div><div><span>权限模式</span><code>--dangerously-skip-permissions</code></div><div><span>允许根目录</span><div>{health?.allowedRoots?.map((root) => <code key={root}>{root}</code>) ?? <code>等待连接</code>}</div></div></section>
         </TabsContent>
       </Tabs>
     </SheetContent>

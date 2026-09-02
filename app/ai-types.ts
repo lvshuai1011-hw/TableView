@@ -2,6 +2,13 @@ import type { ColumnAnnotation, EnumValue, SchemaTable } from "./data";
 
 export type AiConfidence = "high" | "medium" | "low";
 
+export type AiDataset = {
+  id: string;
+  createdAt: string;
+  tableCount: number;
+  relationshipCount: number;
+};
+
 export type AiColumnDraft = ColumnAnnotation & {
   name: string;
   confidence: AiConfidence;
@@ -54,6 +61,8 @@ export type AiSessionSummary = {
   tableName: string;
   domain0: string;
   jobId: string | null;
+  datasetId?: string | null;
+  relatedTableCount?: number;
   status: string;
   createdAt: string;
   updatedAt: string;
@@ -84,6 +93,7 @@ export type AiJob = {
   createdAt: string;
   updatedAt: string;
   error: string | null;
+  datasetId?: string | null;
 };
 
 export type AiHealth = {
@@ -103,6 +113,7 @@ export type AiPanelProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   tables: SchemaTable[];
+  datasetReady: boolean;
   initialTableName: string | null;
   onReviewTable: (tableName: string | null) => void;
   onApplyDraft: (draft: AiTableDraft, session: AiSession) => void;

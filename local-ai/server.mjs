@@ -72,6 +72,14 @@ function requestPromptTemplate(value, fallback = defaultPromptTemplate) {
   }
 }
 
+async function requestDatasetContext(datasetId, tableName) {
+  try {
+    return await store.readDatasetContext(datasetId, tableName);
+  } catch (error) {
+    throw Object.assign(error, { statusCode: 400 });
+  }
+}
+
 function message(role, content, extra = {}) {
   return { id: randomUUID(), role, content, at: now(), ...extra };
 }
@@ -103,7 +111,7 @@ function parseLines(onLine) {
   };
 }
 
-function claudeArguments(session, prompt, referencePaths) {
+function claudeArguments(session, prompt, referencePaths, datasetDirectory) {
   const args = [
     "-p",
     "--dangerously-skip-permissions",
@@ -113,36 +121,40 @@ function claudeArguments(session, prompt, referencePaths) {
   ];
   if (session.turnCount > 0) args.push("--resume", session.claudeSessionId);
   else args.push("--session-id", session.claudeSessionId, "--name", session.name);
-  [...new Set(referencePaths.map((entry) => entry.addDir))].forEach((directory) => {
+  [...new Set([...referencePaths.map((entry) => entry.addDir), datasetDirectory].filter(Boolean))].forEach((directory) => {
     args.push("--add-dir", directory);
   });
   args.push(prompt);
   return args;
 }
 
-async function runClaudeTurn({ session, table, userMessage, mode, referencePaths, promptTemplate, onEvent = () => {} }) {
+async function runClaudeTurn({ session, table, userMessage, mode, datasetContext, referencePaths, promptTemplate, onEvent = () => {} }) {
   if (runningSessions.has(session.id)) throw Object.assign(new Error("该会话正在运行，请等待本轮完成"), { statusCode: 409 });
+  if (!datasetContext) throw Object.assign(new Error("缺少当前表的数据集上下文"), { statusCode: 400 });
   const workspace = store.workspacePath(session.id);
   await writeFile(path.join(workspace, "input-table.json"), `${JSON.stringify(table, null, 2)}\n`, "utf8");
+  await writeFile(path.join(workspace, "dataset-context.json"), `${JSON.stringify(datasetContext, null, 2)}\n`, "utf8");
   if (session.draft) await writeFile(path.join(workspace, "current-draft.json"), `${JSON.stringify(session.draft, null, 2)}\n`, "utf8");
   const clarifications = session.todos.filter((todo) => todo.status === "answered" && todo.answer);
   await writeFile(path.join(workspace, "reference-paths.json"), `${JSON.stringify(referencePaths, null, 2)}\n`, "utf8");
   await writeFile(path.join(workspace, "clarifications.json"), `${JSON.stringify(clarifications, null, 2)}\n`, "utf8");
-  const prompt = buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, referencePaths, clarifications });
+  const prompt = buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, datasetContext, referencePaths, clarifications });
 
   session.status = "running";
   session.error = null;
   session.referencePaths = referencePaths;
+  session.datasetId = datasetContext.datasetId;
+  session.relatedTableCount = datasetContext.relatedTables.length;
   session.promptTemplate = promptTemplate;
   session.messages.push(message("user", userMessage));
-  compactActivity(session, "准备本轮上下文");
+  compactActivity(session, `准备当前表与 ${datasetContext.relatedTables.length} 张关联表`);
   await store.saveSession(session);
   onEvent({ type: "started", session: await store.readSession(session.id) });
 
   const events = [];
   const stderr = [];
   let rawWrite = Promise.resolve();
-  const child = spawn(claudeBin, claudeArguments(session, prompt, referencePaths), {
+  const child = spawn(claudeBin, claudeArguments(session, prompt, referencePaths, datasetContext.datasetDir), {
     cwd: workspace,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -292,7 +304,8 @@ async function runBatch(job, tables, references) {
       }
       let session;
       try {
-        session = await store.createSession({ table, jobId: job.id, referencePaths: references, promptTemplate: job.promptTemplate });
+        const datasetContext = await requestDatasetContext(job.datasetId, table.tableName);
+        session = await store.createSession({ table, jobId: job.id, datasetId: job.datasetId, referencePaths: references, promptTemplate: job.promptTemplate });
         job.sessionIds.push(session.id);
         await store.saveJob(job);
         await runClaudeTurn({
@@ -300,6 +313,7 @@ async function runBatch(job, tables, references) {
           table,
           mode: "generate",
           userMessage: job.batchInstruction,
+          datasetContext,
           referencePaths: references,
           promptTemplate: job.promptTemplate,
         });
@@ -329,7 +343,8 @@ async function handleChat(request, response) {
   if (body.sessionId && !session) throw Object.assign(new Error("会话不存在"), { statusCode: 404 });
   if (session && session.tableName !== body.table.tableName) throw Object.assign(new Error("会话与当前表不匹配"), { statusCode: 409 });
   const promptTemplate = requestPromptTemplate(body.promptTemplate, session?.promptTemplate || defaultPromptTemplate);
-  if (!session) session = await store.createSession({ table: body.table, referencePaths: validation.resolved, promptTemplate });
+  const datasetContext = await requestDatasetContext(body.datasetId, body.table.tableName);
+  if (!session) session = await store.createSession({ table: body.table, datasetId: datasetContext.datasetId, referencePaths: validation.resolved, promptTemplate });
   const userMessage = typeof body.message === "string" ? body.message.trim() : "";
   if (!userMessage) throw Object.assign(new Error("请填写本轮生成或修订要求"), { statusCode: 400 });
 
@@ -348,6 +363,7 @@ async function handleChat(request, response) {
       table: body.table,
       mode: session.turnCount > 0 ? "correct" : "generate",
       userMessage,
+      datasetContext,
       referencePaths: validation.resolved,
       promptTemplate,
       onEvent: send,
@@ -368,8 +384,15 @@ async function handleGenerate(request, response) {
   const promptTemplate = requestPromptTemplate(body.promptTemplate);
   const batchInstruction = typeof body.batchInstruction === "string" ? body.batchInstruction.trim() : "";
   if (!batchInstruction) throw Object.assign(new Error("请填写批量生成要求"), { statusCode: 400 });
+  const datasetId = String(body.datasetId ?? "");
+  let datasetManifest;
+  try { datasetManifest = await store.readDatasetManifest(datasetId); }
+  catch (error) { throw Object.assign(error, { statusCode: 400 }); }
+  const datasetTableNames = new Set(datasetManifest.tables.map((table) => table.tableName));
+  const missingTable = tables.find((table) => !datasetTableNames.has(table.tableName));
+  if (missingTable) throw Object.assign(new Error(`数据集快照中没有待处理表：${missingTable.tableName}`), { statusCode: 400 });
   const label = scope.level === "domain" && scope.domain0 ? `${scope.domain0} · AI 全量标注` : `全部域 · AI 全量标注`;
-  const job = await store.createJob({ label, scope, tables, referencePaths: validation.resolved, promptTemplate, batchInstruction });
+  const job = await store.createJob({ label, scope, tables, datasetId, referencePaths: validation.resolved, promptTemplate, batchInstruction });
   setImmediate(() => runBatch(job, tables, validation.resolved));
   jsonResponse(response, 202, { job });
 }
@@ -389,16 +412,18 @@ async function handleTodoAnswer(request, response, todoId) {
   if (validTable(body.table) && body.table.tableName !== session.tableName) {
     throw Object.assign(new Error("当前表与待澄清项不匹配"), { statusCode: 409 });
   }
+  const table = validTable(body.table)
+    ? body.table
+    : JSON.parse(await readFile(path.join(store.workspacePath(session.id), "input-table.json"), "utf8"));
+  const promptTemplate = requestPromptTemplate(body.promptTemplate, session.promptTemplate || defaultPromptTemplate);
+  const datasetContext = await requestDatasetContext(body.datasetId || session.datasetId, table.tableName);
   const todo = session.todos.find((item) => item.id === todoId);
+  if (!todo) throw Object.assign(new Error("待澄清项已不存在"), { statusCode: 404 });
   todo.status = "answered";
   todo.answer = answer;
   todo.answeredAt = now();
   session.status = "queued";
   await store.saveSession(session);
-  const table = validTable(body.table)
-    ? body.table
-    : JSON.parse(await readFile(path.join(store.workspacePath(session.id), "input-table.json"), "utf8"));
-  const promptTemplate = requestPromptTemplate(body.promptTemplate, session.promptTemplate || defaultPromptTemplate);
   setImmediate(async () => {
     try {
       await runClaudeTurn({
@@ -406,6 +431,7 @@ async function handleTodoAnswer(request, response, todoId) {
         table,
         mode: "correct",
         userMessage: answer,
+        datasetContext,
         referencePaths: session.referencePaths ?? [],
         promptTemplate,
       });
@@ -428,6 +454,15 @@ async function handleRequest(request, response) {
   if (url.pathname === "/api/ai/prompt-default") {
     if (request.method !== "GET") return methodNotAllowed(response);
     return jsonResponse(response, 200, { promptTemplate: defaultPromptTemplate });
+  }
+  if (url.pathname === "/api/ai/datasets/sync") {
+    if (request.method !== "POST") return methodNotAllowed(response);
+    const body = await readJsonBody(request);
+    if (!Array.isArray(body.tables) || !body.tables.every(validTable)) {
+      return jsonResponse(response, 400, { error: "缺少有效的导入表数据集" });
+    }
+    const dataset = await store.syncDataset(body.tables);
+    return jsonResponse(response, 200, { dataset });
   }
   if (url.pathname === "/api/ai/sessions") {
     if (request.method !== "GET") return methodNotAllowed(response);

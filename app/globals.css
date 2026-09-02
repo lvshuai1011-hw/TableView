@@ -695,6 +695,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-session-detail-head > div:last-child button { height: 29px; font-size: 10px; }
 .ai-session-detail-head code { color: #29485f; font-size: 13px; font-weight: 700; }
 .ai-session-detail-head span { overflow: hidden; color: #8a98a4; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.ai-session-detail-head small { color: #66837f; font-size: 10px; }
 .ai-loading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 220px; color: #748b97; font-size: 12px; }
 .ai-activities { margin-top: 14px; padding: 10px 12px; background: #fff; border: 1px solid #e0e7e9; border-radius: 8px; }
 .ai-activities summary { color: #607789; font-size: 11px; cursor: pointer; }
@@ -714,6 +715,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-prompt-variables code { padding: 4px 7px; color: #37756e; background: #edf7f5; border: 1px solid #d8eae7; border-radius: 6px; font-size: 10px; }
 .ai-prompt-settings textarea { min-height: 430px; resize: vertical; color: #405a6e; background: #f8fafb; font: 12px/1.65 "SFMono-Regular", Consolas, monospace; tab-size: 2; }
 .ai-prompt-error { display: flex; align-items: center; gap: 6px; padding: 8px 9px; color: #a14d4d; background: #fff0f0; border-radius: 7px; font-size: 11px; }
+.ai-prompt-warning { display: flex; align-items: center; gap: 6px; padding: 8px 9px; color: #85601f; background: #fff8e7; border-radius: 7px; font-size: 11px; }
+.ai-prompt-warning code { font-size: 10px; }
 .ai-prompt-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .ai-prompt-footer > span { color: #8796a2; font-size: 11px; }
 .ai-prompt-footer button { height: 31px; font-size: 11px; }

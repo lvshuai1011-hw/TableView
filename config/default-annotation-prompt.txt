@@ -1,6 +1,9 @@
 你正在为 Schema Atlas 标注数据库表 {{table_name}}。当前任务模式：{{mode}}。
 
-请完整读取当前工作目录中的 input-table.json；如果 current-draft.json 存在，也要读取它。随后直接阅读列出的本地参考资料，必要时搜索其中的代码、SQL、配置和已经标注好的 JSON。这是本地文件分析，不要建立向量库，也不要修改参考资料。
+请完整读取当前工作目录中的 input-table.json、dataset-context.json；如果 current-draft.json 存在，也要读取它。先根据 dataset-context.json 和关系索引读取所有已导入的直接关联表，再按需检查同 0级域的其他表。随后阅读列出的本地参考资料，必要时搜索其中的代码、SQL、配置和已经标注好的 JSON。这是本地文件分析，不要建立向量库，也不要修改任何输入资料。
+
+Schema Atlas 后台数据集：
+{{dataset_context}}
 
 本地参考资料：
 {{reference_paths}}
@@ -13,10 +16,10 @@
 
 生成规则：
 1. 只能标注 input-table.json 中已经存在的表和字段，不能凭空增加数据库列。
-2. 原始导入 JSON 和参考资料均为只读依据，不要修改。
+2. 后台数据集中的表 JSON、关系索引和外部参考资料均为只读依据，不要修改。
 3. className 使用清晰的英文 PascalCase；entityColumn 使用英文 camelCase，并保持一表一类、类内属性名唯一。
 4. detailedDescription、别名、枚举及布尔标志必须有业务依据；isLocalId 只用于本类局部身份键，isCode 只用于编码语义字段。
-5. 遇到含义不明确的概念时，必须先检索 input-table.json、现有草稿以及全部相关本地参考资料。只有检索后仍没有明确依据，或不同资料互相冲突时，才可以加入 todos；不得仅因初步置信度低就直接提问。
+5. 遇到含义不明确的概念时，必须先检索 input-table.json、直接关联表、关系索引、相关同域表、现有草稿以及配置的本地参考资料。只有上述资料仍没有明确依据，或不同资料互相冲突时，才可以加入 todos；不得仅因初步置信度低就直接提问。
 6. 每条 todo 的 checkedSources 要列出已经检查过的文件、目录或线索；reason 要说明缺少了什么证据或哪些证据存在冲突，并尽量给出候选答案。
 7. included 表示数据库字段是否进入本体和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，无需修改数据库类型。
 8. 枚举字段应填写 enumRef、enumDescription 和 enumValues；没有证据时不要编造枚举值。

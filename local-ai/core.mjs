@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -280,6 +280,7 @@ export function normalizeStructuredOutput(value, table, sessionId) {
 export const PROMPT_TEMPLATE_KEYS = [
   "table_name",
   "mode",
+  "dataset_context",
   "reference_paths",
   "clarifications",
   "user_message",
@@ -295,8 +296,23 @@ export function normalizePromptTemplate(value) {
   return value.trim();
 }
 
-export function buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, referencePaths, clarifications }) {
+export function buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, datasetContext, referencePaths, clarifications }) {
   const template = normalizePromptTemplate(promptTemplate);
+  const relatedTables = datasetContext?.relatedTables?.length
+    ? datasetContext.relatedTables.map((entry) => `  - ${entry.tableName}: ${entry.path}`).join("\n")
+    : "  - 没有已导入的直接关联表";
+  const datasetText = datasetContext
+    ? [
+      `- 数据集 ID：${datasetContext.datasetId}`,
+      "- Session 上下文索引：dataset-context.json",
+      `- 数据集清单：${datasetContext.manifestPath}`,
+      `- 全局关系索引：${datasetContext.relationIndexPath}`,
+      `- 当前表落盘文件：${datasetContext.currentTable.path}`,
+      "- 已导入的直接关联表：",
+      relatedTables,
+      "- 同 0级域的其他表路径已列在 dataset-context.json 的 domainTables 中。",
+    ].join("\n")
+    : "- 当前任务未绑定后台数据集快照";
   const references = referencePaths.length
     ? referencePaths.map((entry) => `- ${entry.resolvedPath}`).join("\n")
     : "- 未配置额外参考资料";
@@ -306,6 +322,7 @@ export function buildAnnotationPrompt({ promptTemplate, table, mode, userMessage
   const replacements = {
     table_name: table.tableName,
     mode: mode === "generate" ? "首次生成" : "人工审核后的纠正",
+    dataset_context: datasetText,
     reference_paths: references,
     clarifications: clarificationText,
     user_message: typeof userMessage === "string" ? userMessage : "",
@@ -394,18 +411,122 @@ function safeId(value) {
   return id;
 }
 
+function safeDatasetId(value) {
+  const id = String(value ?? "");
+  if (!/^[0-9a-f]{64}$/i.test(id)) throw new Error("无效的数据集 ID");
+  return id.toLowerCase();
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item ?? null)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function tableFileName(tableName) {
+  const name = stringValue(tableName);
+  if (/^[A-Za-z0-9_$#.-]{1,160}$/.test(name) && name !== "." && name !== "..") return `${name}.json`;
+  const readable = name.replace(/[^A-Za-z0-9_$#.-]+/g, "_").replace(/^\.+|\.+$/g, "").slice(0, 120) || "table";
+  const suffix = createHash("sha256").update(name).digest("hex").slice(0, 12);
+  return `${readable}-${suffix}.json`;
+}
+
+function relationshipKey(relationship) {
+  const mappings = Array.isArray(relationship?.columnMapping)
+    ? relationship.columnMapping.map((mapping) => `${stringValue(mapping?.parentColumn)}>${stringValue(mapping?.childColumn)}`).join(",")
+    : "";
+  return [
+    stringValue(relationship?.parentTable),
+    stringValue(relationship?.childTable),
+    stringValue(relationship?.constraintName, stringValue(relationship?.name)),
+    mappings,
+  ].join("|");
+}
+
+function datasetArtifacts(tables, id, createdAt) {
+  const tableNames = new Set(tables.map((table) => table.tableName));
+  const relations = [];
+  const relationKeys = new Set();
+  tables.forEach((table) => {
+    [...(Array.isArray(table.foreignKeys) ? table.foreignKeys : []), ...(Array.isArray(table.referencedBy) ? table.referencedBy : [])]
+      .forEach((relationship) => {
+        if (!relationship || typeof relationship !== "object") return;
+        const key = relationshipKey(relationship);
+        if (!key || relationKeys.has(key)) return;
+        relationKeys.add(key);
+        relations.push(relationship);
+      });
+  });
+  const byTable = Object.fromEntries(tables.map((table) => [table.tableName, {
+    foreignKeys: [],
+    referencedBy: [],
+    selfReferences: [],
+    relatedTables: [],
+  }]));
+  relations.forEach((relationship) => {
+    const parent = stringValue(relationship.parentTable);
+    const child = stringValue(relationship.childTable);
+    if (parent === child && byTable[parent]) byTable[parent].selfReferences.push(relationship);
+    if (byTable[child]) byTable[child].foreignKeys.push(relationship);
+    if (byTable[parent]) byTable[parent].referencedBy.push(relationship);
+    if (parent !== child && tableNames.has(parent) && tableNames.has(child)) {
+      if (!byTable[parent].relatedTables.includes(child)) byTable[parent].relatedTables.push(child);
+      if (!byTable[child].relatedTables.includes(parent)) byTable[child].relatedTables.push(parent);
+    }
+  });
+  Object.values(byTable).forEach((entry) => entry.relatedTables.sort((a, b) => a.localeCompare(b)));
+  const domains = new Map();
+  tables.forEach((table) => {
+    const key = stringValue(table.domain0, "未归类");
+    const value = domains.get(key) ?? { name: key, tableCount: 0, levelOneDomains: new Set() };
+    value.tableCount += 1;
+    if (stringValue(table.domain1)) value.levelOneDomains.add(stringValue(table.domain1));
+    domains.set(key, value);
+  });
+  const manifest = {
+    schemaVersion: 1,
+    id,
+    createdAt,
+    tableCount: tables.length,
+    relationshipCount: relations.length,
+    domains: [...domains.values()].map((domain) => ({
+      name: domain.name,
+      tableCount: domain.tableCount,
+      levelOneDomains: [...domain.levelOneDomains].sort((a, b) => a.localeCompare(b, "zh-CN")),
+    })).sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
+    tables: tables.map((table) => ({
+      tableName: table.tableName,
+      description: stringValue(table.description),
+      domain0: stringValue(table.domain0, "未归类"),
+      domain1: stringValue(table.domain1),
+      columnCount: Array.isArray(table.columns) ? table.columns.length : 0,
+      file: path.posix.join("tables", tableFileName(table.tableName)),
+    })),
+  };
+  return { manifest, relationIndex: { schemaVersion: 1, datasetId: id, relations, byTable } };
+}
+
 export class AtlasStore {
   constructor(rootDir) {
     this.rootDir = rootDir;
     this.sessionsDir = path.join(rootDir, "sessions");
     this.jobsDir = path.join(rootDir, "jobs");
+    this.datasetsDir = path.join(rootDir, "datasets");
     this.sessionIndexPath = path.join(this.sessionsDir, "index.json");
     this.jobIndexPath = path.join(this.jobsDir, "index.json");
+    this.currentDatasetPath = path.join(this.datasetsDir, "current.json");
     this.writeQueue = Promise.resolve();
   }
 
   async init() {
-    await Promise.all([mkdir(this.sessionsDir, { recursive: true }), mkdir(this.jobsDir, { recursive: true })]);
+    await Promise.all([
+      mkdir(this.sessionsDir, { recursive: true }),
+      mkdir(this.jobsDir, { recursive: true }),
+      mkdir(this.datasetsDir, { recursive: true }),
+    ]);
     await Promise.all([this.ensureJson(this.sessionIndexPath, []), this.ensureJson(this.jobIndexPath, [])]);
   }
 
@@ -434,6 +555,86 @@ export class AtlasStore {
   transcriptPath(id) { return path.join(this.sessionsDir, `${safeId(id)}.stream.jsonl`); }
   workspacePath(id) { return path.join(this.sessionsDir, `${safeId(id)}.workspace`); }
   jobPath(id) { return path.join(this.jobsDir, `${safeId(id)}.json`); }
+  datasetPath(id) { return path.join(this.datasetsDir, safeDatasetId(id)); }
+
+  async syncDataset(rawTables) {
+    if (!Array.isArray(rawTables)) throw new Error("数据集必须是表数组");
+    const tables = [...rawTables].sort((a, b) => String(a.tableName).localeCompare(String(b.tableName)));
+    const names = new Set();
+    tables.forEach((table) => {
+      const name = stringValue(table?.tableName);
+      if (!name || !Array.isArray(table?.columns)) throw new Error("数据集中存在无效表结构");
+      if (names.has(name)) throw new Error(`数据集中存在重复表名：${name}`);
+      names.add(name);
+    });
+    const id = createHash("sha256").update(canonicalJson(tables)).digest("hex");
+    return this.serialize(async () => {
+      const datasetDir = this.datasetPath(id);
+      const manifestPath = path.join(datasetDir, "manifest.json");
+      let manifest = await this.readJson(manifestPath, null);
+      if (!manifest) {
+        const createdAt = new Date().toISOString();
+        const artifacts = datasetArtifacts(tables, id, createdAt);
+        await mkdir(path.join(datasetDir, "tables"), { recursive: true });
+        await Promise.all(tables.map((table) => this.atomicWrite(
+          path.join(datasetDir, "tables", tableFileName(table.tableName)),
+          table,
+        )));
+        await this.atomicWrite(path.join(datasetDir, "relation-index.json"), artifacts.relationIndex);
+        await this.atomicWrite(manifestPath, artifacts.manifest);
+        manifest = artifacts.manifest;
+      }
+      await this.atomicWrite(this.currentDatasetPath, {
+        datasetId: id,
+        syncedAt: new Date().toISOString(),
+        tableCount: manifest.tableCount,
+        relationshipCount: manifest.relationshipCount,
+      });
+      return manifest;
+    });
+  }
+
+  async readDatasetContext(datasetId, tableName) {
+    const datasetDir = this.datasetPath(datasetId);
+    const manifest = await this.readDatasetManifest(datasetId);
+    const relationIndex = await this.readJson(path.join(datasetDir, "relation-index.json"), null);
+    if (!relationIndex) throw new Error("数据集关系索引不存在，请重新同步导入表");
+    const current = manifest.tables.find((table) => table.tableName === tableName);
+    if (!current) throw new Error(`数据集快照中没有当前表：${tableName}`);
+    const tableContext = relationIndex.byTable?.[tableName] ?? {
+      foreignKeys: [], referencedBy: [], selfReferences: [], relatedTables: [],
+    };
+    const entryByName = new Map(manifest.tables.map((table) => [table.tableName, table]));
+    const withAbsolutePath = (entry) => ({
+      ...entry,
+      path: path.join(datasetDir, ...entry.file.split("/")),
+    });
+    const relatedTables = tableContext.relatedTables
+      .map((name) => entryByName.get(name))
+      .filter(Boolean)
+      .map(withAbsolutePath);
+    const domainTables = manifest.tables
+      .filter((entry) => entry.domain0 === current.domain0 && entry.tableName !== tableName)
+      .map(withAbsolutePath);
+    return {
+      schemaVersion: 1,
+      datasetId: manifest.id,
+      datasetDir,
+      manifestPath: path.join(datasetDir, "manifest.json"),
+      relationIndexPath: path.join(datasetDir, "relation-index.json"),
+      currentTable: withAbsolutePath(current),
+      relatedTables,
+      domainTables,
+      relationships: tableContext,
+    };
+  }
+
+  async readDatasetManifest(datasetId) {
+    const datasetDir = this.datasetPath(datasetId);
+    const manifest = await this.readJson(path.join(datasetDir, "manifest.json"), null);
+    if (!manifest) throw new Error("数据集快照不存在，请重新同步导入表");
+    return manifest;
+  }
 
   async listSessions() {
     return this.readJson(this.sessionIndexPath, []);
@@ -456,6 +657,8 @@ export class AtlasStore {
         tableName: session.tableName,
         domain0: session.domain0,
         jobId: session.jobId ?? null,
+        datasetId: session.datasetId ?? null,
+        relatedTableCount: session.relatedTableCount ?? 0,
         status: session.status,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
@@ -471,7 +674,7 @@ export class AtlasStore {
     });
   }
 
-  async createSession({ table, jobId = null, referencePaths = [], promptTemplate = "" }) {
+  async createSession({ table, jobId = null, datasetId = null, referencePaths = [], promptTemplate = "" }) {
     const id = randomUUID();
     const now = new Date().toISOString();
     const session = {
@@ -482,6 +685,7 @@ export class AtlasStore {
       tableName: table.tableName,
       domain0: stringValue(table.domain0, "未归类"),
       jobId,
+      datasetId,
       status: "idle",
       createdAt: now,
       updatedAt: now,
@@ -522,6 +726,7 @@ export class AtlasStore {
         total: job.total,
         completed: job.completed,
         failed: job.failed,
+        datasetId: job.datasetId ?? null,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
         error: job.error ?? null,
@@ -533,7 +738,7 @@ export class AtlasStore {
     });
   }
 
-  async createJob({ label, scope, tables, referencePaths, promptTemplate, batchInstruction }) {
+  async createJob({ label, scope, tables, datasetId, referencePaths, promptTemplate, batchInstruction }) {
     const id = randomUUID();
     const now = new Date().toISOString();
     const job = {
@@ -548,6 +753,7 @@ export class AtlasStore {
       updatedAt: now,
       tableNames: tables.map((table) => table.tableName),
       sessionIds: [],
+      datasetId,
       referencePaths,
       promptTemplate,
       batchInstruction,
