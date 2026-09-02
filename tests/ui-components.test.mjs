@@ -199,3 +199,63 @@ test("writes enum references and definitions as separate files", async () => {
   assert.equal(ontology.attributes[0].is_code, undefined);
   assert.equal(enumFile.values[0].description_en, "Daily limit");
 });
+
+test("reports missing relationship fields separately from excluded export fields", async () => {
+  const {
+    countRelationshipFieldGaps,
+    inspectRelationshipMappings,
+    isMissingRelationField,
+    migrateTables,
+  } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const tables = migrateTables([
+    {
+      tableName: "PARENT_TABLE",
+      description: "",
+      folder: "",
+      domain0: "Demo",
+      domain1: "",
+      columns: [{ name: "ID", description: "", dataType: "NUMBER(20)", length: "20", isPrimaryKey: true, nullable: false, remark: "" }],
+      foreignKeys: [],
+      referencedBy: [],
+    },
+    {
+      tableName: "CHILD_TABLE",
+      description: "",
+      folder: "",
+      domain0: "Demo",
+      domain1: "",
+      columns: [{ name: "PARENT_ID", description: "", dataType: "NUMBER(20)", length: "20", isPrimaryKey: false, nullable: true, remark: "" }],
+      foreignKeys: [],
+      referencedBy: [],
+    },
+  ]);
+  const missingField = {
+    name: "FK_MISSING_FIELD",
+    parentTable: "PARENT_TABLE",
+    childTable: "CHILD_TABLE",
+    cardinality: "1:N",
+    cardinalityRaw: "0..*",
+    deleteConstraint: "RESTRICT",
+    updateConstraint: "RESTRICT",
+    constraintName: "",
+    columnMapping: [{ parentColumn: "NOT_IMPORTED_ID", childColumn: "PARENT_ID" }],
+  };
+  const missingTable = {
+    ...missingField,
+    name: "FK_MISSING_TABLE",
+    parentTable: "NOT_IMPORTED_TABLE",
+    columnMapping: [{ parentColumn: "ID", childColumn: "PARENT_ID" }],
+  };
+  const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
+
+  assert.deepEqual(inspectRelationshipMappings(missingField, tableIndex).map(({ parentState, childState }) => [parentState, childState]), [["field-missing", "ok"]]);
+  assert.deepEqual(inspectRelationshipMappings(missingTable, tableIndex).map(({ parentState, childState }) => [parentState, childState]), [["table-missing", "ok"]]);
+  assert.equal(countRelationshipFieldGaps([missingField, missingTable], tables), 2);
+
+  tables[0].columns[0].annotation.included = false;
+  const excluded = { ...missingField, name: "FK_EXCLUDED", columnMapping: [{ parentColumn: "ID", childColumn: "PARENT_ID" }] };
+  const excludedState = inspectRelationshipMappings(excluded, tableIndex)[0].parentState;
+  assert.equal(excludedState, "excluded");
+  assert.equal(isMissingRelationField(excludedState), false);
+  assert.equal(countRelationshipFieldGaps([excluded], tables), 0);
+});

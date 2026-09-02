@@ -250,6 +250,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .model-status { display: flex; align-items: center; gap: 7px; color: #64768a; font-size: 10px; }
 .model-status i { width: 7px; height: 7px; background: #4fc69a; border-radius: 50%; }
 .model-status span { width: 1px; height: 12px; margin: 0 2px; background: #d9e0e2; }
+.quality-alert { display: flex; align-items: center; gap: 4px; color: #b35450; font-size: 10px; font-weight: 700; }
 
 /* Relationship canvas */
 .graph-stage {
@@ -377,6 +378,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .relation-detail-head code { min-width: 0; overflow: hidden; color: #30465d; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .relation-detail-head [data-slot="badge"] { height: 22px; font-size: 9px; }
 .relation-badges { display: flex; align-items: center; gap: 5px; }
+.mapping-gap-badge { color: #a74f4f !important; background: #fff0f0 !important; border-color: #e6bcbc !important; }
 .relation-route { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: center; gap: 7px; margin: 12px 0; }
 .relation-route > div { min-width: 0; display: grid; gap: 4px; padding: 9px; background: #f5f7f8; border-radius: 7px; }
 .relation-route > div.missing { background: #fff8ee; }
@@ -387,6 +389,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .mapping-heading { margin: 4px 0 7px; color: #8795a3; font-size: 8.5px; }
 .mapping-rows { display: grid; gap: 5px; }
 .mapping-rows > div { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr); align-items: center; gap: 5px; padding: 7px 8px; color: #21877e; background: #f4f8f7; border-radius: 6px; }
+.mapping-row.has-missing { background: #fff3f2; box-shadow: inset 3px 0 #c25d57; }
+.mapping-row.has-excluded:not(.has-missing) { background: #fff8ed; box-shadow: inset 3px 0 #c98a3c; }
+.mapping-endpoint { min-width: 0; display: grid; gap: 3px; }
+.mapping-endpoint small { color: #8b98a4; font-size: 7.5px; }
+.mapping-endpoint.table-missing small, .mapping-endpoint.field-missing small { color: #b04e4e; font-weight: 700; }
+.mapping-endpoint.excluded small { color: #b17a31; }
 .mapping-rows code { overflow-wrap: anywhere; color: #50657a; font-size: 8.5px; }
 .constraint-row { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 11px; padding-top: 10px; border-top: 1px solid #e9edee; }
 .constraint-row span { color: #8794a1; font-size: 8px; }

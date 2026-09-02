@@ -172,6 +172,46 @@ export function isSelfRelationship(relationship: Relationship) {
   return relationship.parentTable === relationship.childTable;
 }
 
+export type RelationFieldState = "ok" | "table-missing" | "field-missing" | "excluded";
+
+export type RelationshipMappingInspection = {
+  mapping: Relationship["columnMapping"][number];
+  parentState: RelationFieldState;
+  childState: RelationFieldState;
+};
+
+function relationFieldState(table: SchemaTable | undefined, columnName: string): RelationFieldState {
+  if (!table) return "table-missing";
+  const column = table.columns.find((item) => item.name === columnName);
+  if (!column) return "field-missing";
+  return migrateColumn(column).annotation!.included ? "ok" : "excluded";
+}
+
+export function inspectRelationshipMappings(
+  relationship: Relationship,
+  tableIndex: Map<string, SchemaTable>,
+): RelationshipMappingInspection[] {
+  const parent = tableIndex.get(relationship.parentTable);
+  const child = tableIndex.get(relationship.childTable);
+  return relationship.columnMapping.map((mapping) => ({
+    mapping,
+    parentState: relationFieldState(parent, mapping.parentColumn),
+    childState: relationFieldState(child, mapping.childColumn),
+  }));
+}
+
+export function isMissingRelationField(state: RelationFieldState) {
+  return state === "table-missing" || state === "field-missing";
+}
+
+export function countRelationshipFieldGaps(relationships: Relationship[], tables: SchemaTable[]) {
+  const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
+  return relationships.reduce((total, relationship) => total + inspectRelationshipMappings(relationship, tableIndex)
+    .reduce((count, inspection) => count
+      + (isMissingRelationField(inspection.parentState) ? 1 : 0)
+      + (isMissingRelationField(inspection.childState) ? 1 : 0), 0), 0);
+}
+
 function safeSegment(value: string) {
   const clean = value.trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\.{2,}/g, ".");
   return clean || UNCLASSIFIED;

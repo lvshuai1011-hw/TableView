@@ -32,4 +32,5 @@ test("renders the app shell and catalog delete entry", async () => {
   assert.match(html, />变更记录</);
   assert.match(html, />导出标注</);
   assert.match(html, /我依赖谁 · 子表/);
+  assert.match(html, /字段缺口/);
 });

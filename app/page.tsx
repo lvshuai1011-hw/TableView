@@ -102,14 +102,18 @@ import {
   buildExportFiles,
   CHANGE_LOG_STORAGE_KEY,
   ChangeRecord,
+  countRelationshipFieldGaps,
   createZip,
   defaultClassName,
   isSelfRelationship,
+  inspectRelationshipMappings,
+  isMissingRelationField,
   makeChangeRecord,
   mergeImportedTable,
   migrateColumn,
   migrateTables,
   normalizeDomain1,
+  RelationFieldState,
   validateExportConfiguration,
 } from "./schema-utils";
 
@@ -1085,13 +1089,27 @@ function GraphCanvas({
   </section>;
 }
 
+function relationFieldStateLabel(state: RelationFieldState, side: "parent" | "child") {
+  if (state === "table-missing") return side === "parent" ? "依赖表未导入" : "引用表未导入";
+  if (state === "field-missing") return side === "parent" ? "依赖字段未导入" : "引用字段未导入";
+  if (state === "excluded") return side === "parent" ? "依赖字段不导出" : "引用字段不导出";
+  return "";
+}
+
 function RelationDetail({ relationship, tableIndex }: { relationship: Relationship; tableIndex: Map<string, SchemaTable> }) {
   const parentImported = tableIndex.has(relationship.parentTable);
   const childImported = tableIndex.has(relationship.childTable);
+  const inspections = inspectRelationshipMappings(relationship, tableIndex);
+  const missingCount = inspections.reduce((count, inspection) => count
+    + (isMissingRelationField(inspection.parentState) ? 1 : 0)
+    + (isMissingRelationField(inspection.childState) ? 1 : 0), 0);
+  const excludedCount = inspections.reduce((count, inspection) => count
+    + (inspection.parentState === "excluded" ? 1 : 0)
+    + (inspection.childState === "excluded" ? 1 : 0), 0);
   return <article className="relation-detail">
     <div className="relation-detail-head">
       <div><GitBranch size={16} /><code>{relationship.name}</code></div>
-      <div className="relation-badges">{isSelfRelationship(relationship) && <Badge variant="outline">自引用 · 图中隐藏</Badge>}<Badge variant="outline">{relationship.cardinality}</Badge></div>
+      <div className="relation-badges">{missingCount > 0 && <Badge variant="outline" className="mapping-gap-badge"><CircleAlert size={11} />{missingCount} 个字段缺口</Badge>}{excludedCount > 0 && <Badge variant="outline">{excludedCount} 个字段不导出</Badge>}{isSelfRelationship(relationship) && <Badge variant="outline">自引用 · 图中隐藏</Badge>}<Badge variant="outline">{relationship.cardinality}</Badge></div>
     </div>
     <div className="relation-route">
       <div className={!childImported ? "missing" : ""}><span>子表 · 引用方</span><code>{relationship.childTable}</code>{!childImported && <small>未导入</small>}</div>
@@ -1099,7 +1117,16 @@ function RelationDetail({ relationship, tableIndex }: { relationship: Relationsh
       <div className={!parentImported ? "missing" : ""}><span>父表 · 被引用方</span><code>{relationship.parentTable}</code>{!parentImported && <small>未导入</small>}</div>
     </div>
     <div className="mapping-heading">字段映射</div>
-    <div className="mapping-rows">{relationship.columnMapping.map((mapping, index) => <div key={`${mapping.childColumn}-${mapping.parentColumn}-${index}`}><code>{relationship.childTable}.{mapping.childColumn}</code><ArrowRight size={13} /><code>{relationship.parentTable}.{mapping.parentColumn}</code></div>)}</div>
+    <div className="mapping-rows">{inspections.map((inspection, index) => {
+      const { mapping, childState, parentState } = inspection;
+      const hasMissing = isMissingRelationField(childState) || isMissingRelationField(parentState);
+      const hasExcluded = childState === "excluded" || parentState === "excluded";
+      return <div className={`mapping-row ${hasMissing ? "has-missing" : ""} ${hasExcluded ? "has-excluded" : ""}`} key={`${mapping.childColumn}-${mapping.parentColumn}-${index}`}>
+        <div className={`mapping-endpoint ${childState}`}><code>{relationship.childTable}.{mapping.childColumn}</code>{childState !== "ok" && <small>{relationFieldStateLabel(childState, "child")}</small>}</div>
+        <ArrowRight size={13} />
+        <div className={`mapping-endpoint ${parentState}`}><code>{relationship.parentTable}.{mapping.parentColumn}</code>{parentState !== "ok" && <small>{relationFieldStateLabel(parentState, "parent")}</small>}</div>
+      </div>;
+    })}</div>
     <div className="constraint-row">
       <span>删除 <code>{relationship.deleteConstraint}</code></span>
       <span>更新 <code>{relationship.updateConstraint}</code></span>
@@ -1318,6 +1345,7 @@ export default function Home() {
   const [changeRecords, setChangeRecords] = useState<ChangeRecord[]>([]);
   const [auditOpen, setAuditOpen] = useState(false);
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
+  const fieldGapCount = useMemo(() => countRelationshipFieldGaps(relationships, tables), [relationships, tables]);
   const graph = useMemo(() => buildScopeGraph(scope, tables, relationships, depth, direction), [scope, tables, relationships, depth, direction]);
   const selectedFieldTable = fieldTarget ? tables.find((table) => table.tableName === fieldTarget.tableName) : undefined;
   const selectedField = selectedFieldTable?.columns.find((column) => column.name === fieldTarget?.fieldName);
@@ -1579,7 +1607,7 @@ export default function Home() {
           <div className="workspace-title"><Database size={17} /><span>表关系拓扑</span><em>从全局依赖到字段标注</em></div>
         </div>
         <div className="workspace-actions">
-          <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域</div>
+          <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域{fieldGapCount > 0 && <><span /><strong className="quality-alert"><CircleAlert size={12} />{fieldGapCount} 字段缺口</strong></>}</div>
           <Button variant="outline" onClick={() => setAuditOpen(true)}><FilePenLine size={16} />变更记录</Button>
           <Button variant="outline" onClick={exportAnnotations}><FileArchive size={16} />导出标注</Button>
           <Button onClick={() => setImportOpen(true)}><Plus size={16} />导入 JSON</Button>
