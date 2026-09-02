@@ -81,3 +81,117 @@ test("renders sidebar skeletons deterministically", async () => {
   assert.equal(first, second);
   assert.match(first, /--skeleton-width:70%/);
 });
+
+test("normalizes missing level-one domains and exports the requested ontology layout", async () => {
+  const {
+    buildExportFiles,
+    createZip,
+    migrateTables,
+    normalizeDomain1,
+  } = await vite.ssrLoadModule("/app/schema-utils.ts");
+
+  assert.equal(normalizeDomain1("DIAGRAM 1"), "");
+  assert.equal(normalizeDomain1("根目录"), "");
+  assert.equal(normalizeDomain1("免费资源"), "免费资源");
+
+  const [table] = migrateTables([{
+    tableName: "PE_FREE_UNIT",
+    className: "FreeUnitInstance",
+    classDescription: "免费资源实例",
+    classAliases: ["赠送实例"],
+    description: "原表说明",
+    folder: "DIAGRAM 1",
+    domain0: "FreeUnit",
+    domain1: "DIAGRAM 1",
+    columns: [{
+      name: "FREE_UNIT_ID",
+      description: "免费资源标识",
+      dataType: "NUMBER(20)",
+      length: "20",
+      isPrimaryKey: true,
+      nullable: false,
+      remark: "唯一标识",
+      annotation: {
+        included: true,
+        entityColumn: "freeUnitInstanceID",
+        aliases: ["标识", "主键"],
+        detailedDescription: "唯一标识免费资源实例",
+        isLocalId: true,
+        isDisplayName: false,
+        isSemantic: false,
+        semanticRole: "identifier",
+        tags: [],
+        unit: "",
+        enumValues: [],
+        valueRange: "",
+        sensitivity: "none",
+        enumRef: "",
+        enumDescription: "",
+      },
+    }],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+
+  assert.equal(table.domain1, "");
+  const files = buildExportFiles([table]);
+  assert.deepEqual(files.map((file) => file.path), [
+    "ontologies/FreeUnit/entity-classes/FreeUnitInstance.json",
+    "rdb-mapping/FreeUnit/entity-classes/FreeUnitInstance-rdb-mapping.json",
+  ]);
+  const ontology = JSON.parse(files[0].content);
+  assert.equal(ontology.attributes[0].data_type, "number");
+  assert.equal(ontology.attributes[0].is_local_id, true);
+  assert.equal(ontology.attributes[0].attr_name, "freeUnitInstanceID");
+  const zip = createZip(files);
+  assert.deepEqual([...zip.slice(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
+});
+
+test("writes enum references and definitions as separate files", async () => {
+  const { buildExportFiles, migrateTables } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const [table] = migrateTables([{
+    tableName: "PE_QUOTA",
+    className: "FreeUnitPaymentQuota",
+    classDescription: "代付额度",
+    classAliases: [],
+    description: "",
+    folder: "额度",
+    domain0: "FreeUnit",
+    domain1: "额度",
+    columns: [{
+      name: "CYCLE_TYPE",
+      description: "周期类型",
+      dataType: "VARCHAR2(1)",
+      length: "1",
+      isPrimaryKey: false,
+      nullable: false,
+      remark: "",
+      annotation: {
+        included: true,
+        entityColumn: "quotaCycleType",
+        aliases: [],
+        detailedDescription: "代付额度的控制周期",
+        isLocalId: false,
+        isDisplayName: false,
+        isSemantic: false,
+        semanticRole: "code",
+        tags: [],
+        unit: "",
+        enumValues: [{ value: "D", description: "日限额", descriptionEn: "Daily limit", aliases: [] }],
+        valueRange: "",
+        sensitivity: "none",
+        enumRef: "QuotaCycleType",
+        enumDescription: "免费资源代付限额周期类型",
+      },
+    }],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+  const files = buildExportFiles([table]);
+  assert.equal(files[2].path, "ontologies/FreeUnit/enums/QuotaCycleType.json");
+  const ontology = JSON.parse(files[0].content);
+  const enumFile = JSON.parse(files[2].content);
+  assert.equal(ontology.attributes[0].enum_ref, "QuotaCycleType");
+  assert.equal(ontology.attributes[0].is_local_id, undefined);
+  assert.equal(enumFile.values[0].description_en, "Daily limit");
+});

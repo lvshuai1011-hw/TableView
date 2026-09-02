@@ -1,3 +1,43 @@
+export type ExportDataType = "number" | "string" | "datetime" | "boolean" | "unknown";
+
+export type SemanticRole =
+  | "identifier"
+  | "name"
+  | "time"
+  | "amount"
+  | "quantity"
+  | "status"
+  | "code"
+  | "description"
+  | "other";
+
+export type Sensitivity = "none" | "internal" | "sensitive" | "restricted";
+
+export type EnumValue = {
+  value: string;
+  description: string;
+  descriptionEn: string;
+  aliases: string[];
+};
+
+export type ColumnAnnotation = {
+  included: boolean;
+  entityColumn: string;
+  aliases: string[];
+  detailedDescription: string;
+  isLocalId: boolean;
+  isDisplayName: boolean;
+  isSemantic: boolean;
+  semanticRole: SemanticRole;
+  tags: string[];
+  unit: string;
+  enumValues: EnumValue[];
+  valueRange: string;
+  sensitivity: Sensitivity;
+  enumRef: string;
+  enumDescription: string;
+};
+
 export type Column = {
   name: string;
   description: string;
@@ -6,6 +46,7 @@ export type Column = {
   isPrimaryKey: boolean;
   nullable: boolean;
   remark: string;
+  annotation?: ColumnAnnotation;
 };
 
 export type ColumnMapping = {
@@ -27,6 +68,9 @@ export type Relationship = {
 
 export type SchemaTable = {
   tableName: string;
+  className: string;
+  classDescription: string;
+  classAliases: string[];
   description: string;
   folder: string;
   domain0: string;
@@ -214,6 +258,9 @@ export const pePlanPolicyJson = {
 export const seedTables: SchemaTable[] = [
   {
     ...pePlanPolicyJson,
+    className: "PlanPolicy",
+    classDescription: pePlanPolicyJson.description,
+    classAliases: [],
     domain0: "定价域",
     domain1: pePlanPolicyJson.folder,
   },

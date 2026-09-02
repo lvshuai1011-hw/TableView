@@ -18,7 +18,9 @@ import {
   CircleAlert,
   Database,
   Download,
+  FileArchive,
   FileJson,
+  FilePenLine,
   Focus,
   GitBranch,
   KeyRound,
@@ -31,6 +33,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Settings2,
   Search,
   Table2,
   Trash2,
@@ -81,22 +84,42 @@ import { Toaster } from "@/components/ui/sonner";
 
 import {
   Column,
+  ColumnAnnotation,
   ColumnMapping,
   jsonExample,
   Relationship,
-  ROOT_FOLDER,
   SchemaTable,
   seedTables,
   UNCLASSIFIED,
 } from "./data";
+import {
+  AuditLogSheet,
+  FieldEditorDialog,
+  RenameDomainDialog,
+  TableConfigDialog,
+} from "./editor-dialogs";
+import {
+  buildExportFiles,
+  CHANGE_LOG_STORAGE_KEY,
+  ChangeRecord,
+  createZip,
+  defaultClassName,
+  isSelfRelationship,
+  makeChangeRecord,
+  mergeImportedTable,
+  migrateColumn,
+  migrateTables,
+  normalizeDomain1,
+  validateExportConfiguration,
+} from "./schema-utils";
 
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 720;
 const MISSING_ID = "missing:endpoints";
 const TABLE_STORAGE_KEY = "schema-atlas.tables.v1";
 
-type ParsedTable = Omit<SchemaTable, "domain0" | "domain1">;
-type DirectionFilter = "both" | "parents" | "children";
+type ParsedTable = Omit<SchemaTable, "domain0" | "domain1" | "className" | "classDescription" | "classAliases">;
+type DirectionFilter = "both" | "dependencies" | "dependents";
 type Scope =
   | { level: "global" }
   | { level: "domain"; domain0: string }
@@ -226,7 +249,7 @@ function normalizeTable(value: unknown): ParsedTable {
   if (!Array.isArray(data.foreignKeys) || !Array.isArray(data.referencedBy)) {
     throw new Error(`${tableName} 缺少 foreignKeys 或 referencedBy 数组`);
   }
-  const folder = requiredString(data, "folder", tableName, true) || ROOT_FOLDER;
+  const folder = normalizeDomain1(requiredString(data, "folder", tableName, true));
   return {
     tableName,
     description: requiredString(data, "description", tableName, true),
@@ -285,7 +308,7 @@ function aggregateEdges(
   relationships.forEach((relation) => {
     const source = mapEndpoint(relation.childTable);
     const target = mapEndpoint(relation.parentTable);
-    if (!source || !target) return;
+    if (!source || !target || source === target || isSelfRelationship(relation)) return;
     const id = `${source}>${target}`;
     const existing = grouped.get(id);
     const kind: GraphEdge["kind"] = focusTable
@@ -325,7 +348,10 @@ function buildScopeGraph(
     domains.forEach((items, domain0) => ensure(emptyNode(`domain:${domain0}`, {
       kind: "domain",
       label: domain0,
-      caption: `${new Set(items.map((item) => item.domain1)).size} 个 1级域`,
+      caption: (() => {
+        const count = new Set(items.map((item) => item.domain1).filter(Boolean)).size;
+        return count ? `${count} 个 1级域` : "无 1级域";
+      })(),
       meta: "点击进入域内关系",
       count: items.length,
       width: 248,
@@ -375,7 +401,7 @@ function buildScopeGraph(
   if (scope.level === "domain") {
     const domainTables = tables.filter((table) => table.domain0 === scope.domain0);
     const folders = new Map<string, SchemaTable[]>();
-    domainTables.forEach((table) => folders.set(table.domain1, [...(folders.get(table.domain1) ?? []), table]));
+    domainTables.filter((table) => table.domain1).forEach((table) => folders.set(table.domain1, [...(folders.get(table.domain1) ?? []), table]));
     folders.forEach((items, domain1) => ensure(emptyNode(`folder:${scope.domain0}/${domain1}`, {
       kind: "folder",
       label: domain1,
@@ -387,6 +413,15 @@ function buildScopeGraph(
       domain0: scope.domain0,
       domain1,
       members: items.map((item) => item.tableName),
+    })));
+    domainTables.filter((table) => !table.domain1).forEach((table) => ensure(emptyNode(`table:${table.tableName}`, {
+      kind: "table",
+      label: table.tableName,
+      caption: table.description || "暂无表说明",
+      meta: `${table.columns.length} 字段 · 直接隶属 0级域`,
+      tableName: table.tableName,
+      domain0: table.domain0,
+      members: [table.tableName],
     })));
 
     const relevant = relationships.filter((relation) => {
@@ -411,7 +446,7 @@ function buildScopeGraph(
         }));
         return MISSING_ID;
       }
-      if (table.domain0 === scope.domain0) return `folder:${scope.domain0}/${table.domain1}`;
+      if (table.domain0 === scope.domain0) return table.domain1 ? `folder:${scope.domain0}/${table.domain1}` : `table:${table.tableName}`;
       const id = `external-domain:${table.domain0}`;
       ensure(emptyNode(id, {
         kind: "domain",
@@ -438,7 +473,7 @@ function buildScopeGraph(
       nodes: graphNodes,
       edges,
       title: scope.domain0,
-      hint: "1级域保持展开，域外关系收束在右侧",
+      hint: "有 1级域的表按域聚合；没有 1级域的表直接展开",
     };
   }
 
@@ -479,6 +514,20 @@ function buildScopeGraph(
       }
       if (table.domain0 === scope.domain0 && table.domain1 === scope.domain1) return `table:${name}`;
       if (table.domain0 === scope.domain0) {
+        if (!table.domain1) {
+          const id = `external-table:${table.tableName}`;
+          ensure(emptyNode(id, {
+            kind: "table",
+            label: table.tableName,
+            caption: "本域直属表",
+            meta: `${table.columns.length} 字段`,
+            external: true,
+            tableName: table.tableName,
+            domain0: table.domain0,
+            members: [table.tableName],
+          }));
+          return id;
+        }
         const id = `external-folder:${table.domain0}/${table.domain1}`;
         ensure(emptyNode(id, {
           kind: "folder",
@@ -526,25 +575,26 @@ function buildScopeGraph(
   const focusTable = tableIndex.get(scope.tableName);
   const layers = new Map<string, number>([[scope.tableName, 0]]);
   const relationSet = new Map<string, Relationship>();
-  const walk = (mode: "parents" | "children") => {
+  const walk = (mode: "dependencies" | "dependents") => {
     let frontier = new Set([scope.tableName]);
     for (let step = 1; step <= depth; step += 1) {
       const next = new Set<string>();
       relationships.forEach((relation) => {
-        const match = mode === "parents" ? frontier.has(relation.childTable) : frontier.has(relation.parentTable);
+        if (isSelfRelationship(relation)) return;
+        const match = mode === "dependencies" ? frontier.has(relation.childTable) : frontier.has(relation.parentTable);
         if (!match) return;
-        const target = mode === "parents" ? relation.parentTable : relation.childTable;
+        const target = mode === "dependencies" ? relation.parentTable : relation.childTable;
         relationSet.set(relationKey(relation), relation);
         if (!layers.has(target) && target !== scope.tableName) {
-          layers.set(target, mode === "parents" ? -step : step);
+          layers.set(target, mode === "dependencies" ? -step : step);
           next.add(target);
         }
       });
       frontier = next;
     }
   };
-  if (direction !== "children") walk("parents");
-  if (direction !== "parents") walk("children");
+  if (direction !== "dependents") walk("dependencies");
+  if (direction !== "dependencies") walk("dependents");
 
   layers.forEach((layer, tableName) => {
     const table = tableIndex.get(tableName);
@@ -552,7 +602,7 @@ function buildScopeGraph(
       kind: table ? "table" : "ghost",
       label: tableName,
       caption: table?.description || "未导入，仅来自关系定义",
-      meta: table ? `${table.domain0} / ${table.domain1}` : "缺少对应 JSON",
+      meta: table ? [table.domain0, table.domain1].filter(Boolean).join(" / ") : "缺少对应 JSON",
       count: table?.columns.length ?? 0,
       tableName,
       domain0: table?.domain0,
@@ -576,7 +626,7 @@ function buildScopeGraph(
     nodes: [...nodes.values()],
     edges,
     title: scope.tableName,
-    hint: focusTable ? `${focusTable.description || "当前表"} · 父表在左，子表在右` : "该表尚未导入",
+    hint: focusTable ? `${focusTable.description || "当前表"} · 依赖项在左，被依赖项在右` : "该表尚未导入",
   };
 }
 
@@ -617,7 +667,10 @@ function scopeParent(scope: Scope, tables: SchemaTable[]): Scope | null {
   if (scope.level === "domain") return { level: "global" };
   if (scope.level === "folder") return { level: "domain", domain0: scope.domain0 };
   const table = tables.find((item) => item.tableName === scope.tableName);
-  return table ? { level: "folder", domain0: table.domain0, domain1: table.domain1 } : { level: "global" };
+  if (!table) return { level: "global" };
+  return table.domain1
+    ? { level: "folder", domain0: table.domain0, domain1: table.domain1 }
+    : { level: "domain", domain0: table.domain0 };
 }
 
 function AppSidebar({
@@ -631,6 +684,8 @@ function AppSidebar({
   onScope,
   onInspectRelations,
   onRequestDelete,
+  onRenameDomain0,
+  onRenameDomain1,
 }: {
   collapsed: boolean;
   tables: SchemaTable[];
@@ -642,9 +697,11 @@ function AppSidebar({
   onScope: (scope: Scope) => void;
   onInspectRelations: (keys: string[], title: string) => void;
   onRequestDelete: (tableNames: string[]) => void;
+  onRenameDomain0: (domain0: string) => void;
+  onRenameDomain1: (domain0: string, domain1: string) => void;
 }) {
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(() => new Set(tables.map((table) => table.domain0)));
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set(tables.map((table) => `${table.domain0}/${table.domain1}`)));
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set(tables.filter((table) => table.domain1).map((table) => `${table.domain0}/${table.domain1}`)));
   const [tab, setTab] = useState("tree");
   const [managingTables, setManagingTables] = useState(false);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(() => new Set());
@@ -738,8 +795,13 @@ function AppSidebar({
               <div className={`tree-row domain ${domainActive ? "active" : ""}`}>
                 <button className="tree-chevron" onClick={() => toggleDomain(domain0)} aria-label={domainOpen ? "折叠0级域" : "展开0级域"}>{domainOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
                 <button className="tree-label" onClick={() => onScope({ level: "domain", domain0 })}><span>{domain0}</span><em>{domainCount}</em></button>
+                <button className="tree-edit" onClick={() => onRenameDomain0(domain0)} aria-label={`修改 0级域 ${domain0}`} title="修改域名"><FilePenLine size={12} /></button>
               </div>
               {domainOpen && <div className="tree-children">{[...folders.entries()].map(([domain1, items]) => {
+                if (!domain1) return <div className="tree-direct-tables" key={`${domain0}:direct`}>{items.map((table) => <div key={table.tableName} className={`tree-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
+                  <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code></button>
+                  <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={12} /></button>
+                </div>)}</div>;
                 const folderKey = `${domain0}/${domain1}`;
                 const folderOpen = expandedFolders.has(folderKey);
                 const folderActive = scope.level === "folder" && scope.domain0 === domain0 && scope.domain1 === domain1;
@@ -749,6 +811,7 @@ function AppSidebar({
                   <div className={`tree-row folder ${folderActive || focusFolderActive ? "active" : ""}`}>
                     <button className="tree-chevron" onClick={() => toggleFolder(folderKey)} aria-label={folderOpen ? "折叠1级域" : "展开1级域"}>{folderOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button>
                     <button className="tree-label" onClick={() => onScope({ level: "folder", domain0, domain1 })}><span>{domain1}</span><em>{items.length}</em></button>
+                    <button className="tree-edit" onClick={() => onRenameDomain1(domain0, domain1)} aria-label={`修改 1级域 ${domain1}`} title="修改域名"><FilePenLine size={11} /></button>
                   </div>
                   {folderOpen && <div className="tree-tables">{items.map((table) => <div key={table.tableName} className={`tree-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
                     <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code></button>
@@ -765,7 +828,7 @@ function AppSidebar({
           {filteredTables.map((table) => <div key={table.tableName} className={`flat-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
             {managingTables && <input type="checkbox" checked={selectedTables.has(table.tableName)} onChange={() => toggleSelectedTable(table.tableName)} aria-label={`选择 ${table.tableName}`} />}
             <button className="flat-table-open" onClick={() => managingTables ? toggleSelectedTable(table.tableName) : onScope({ level: "focus", tableName: table.tableName })}>
-              <span><Table2 size={14} /></span><div><code>{table.tableName}</code><small>{table.domain0} · {table.domain1}</small></div><em>{table.columns.length}</em>
+              <span><Table2 size={14} /></span><div><code>{table.tableName}</code><small>{[table.domain0, table.domain1].filter(Boolean).join(" · ")}</small></div><em>{table.columns.length}</em>
             </button>
             {!managingTables && <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={13} /></button>}
           </div>)}
@@ -908,9 +971,9 @@ function GraphCanvas({
     </div>
     {scope.level === "focus" ? <div className="focus-controls">
       <div className="control-group" aria-label="关系方向">
-        <button className={direction === "parents" ? "active" : ""} onClick={() => onDirection("parents")}>父表</button>
-        <button className={direction === "both" ? "active" : ""} onClick={() => onDirection("both")}>双向</button>
-        <button className={direction === "children" ? "active" : ""} onClick={() => onDirection("children")}>子表</button>
+        <button className={direction === "dependencies" ? "active" : ""} onClick={() => onDirection("dependencies")}>我依赖谁</button>
+        <button className={direction === "both" ? "active" : ""} onClick={() => onDirection("both")}>同时展示</button>
+        <button className={direction === "dependents" ? "active" : ""} onClick={() => onDirection("dependents")}>谁依赖我</button>
       </div>
       <div className="control-group" aria-label="关系深度">
         <button className={depth === 1 ? "active" : ""} onClick={() => onDepth(1)}>1 层</button>
@@ -1004,8 +1067,8 @@ function GraphCanvas({
       </g>
     </svg>
     <div className="graph-legend">
-      <span><i className="legend-line outbound" />当前表引用父表</span>
-      <span><i className="legend-line inbound" />子表引用当前表</span>
+      <span><i className="legend-line outbound" />我依赖谁 · 子表 → 父表</span>
+      <span><i className="legend-line inbound" />谁依赖我 · 子表 → 当前表</span>
       <span><i className="legend-node missing" />未导入端点</span>
     </div>
     <div className="mini-map" aria-hidden="true">
@@ -1028,7 +1091,7 @@ function RelationDetail({ relationship, tableIndex }: { relationship: Relationsh
   return <article className="relation-detail">
     <div className="relation-detail-head">
       <div><GitBranch size={16} /><code>{relationship.name}</code></div>
-      <Badge variant="outline">{relationship.cardinality}</Badge>
+      <div className="relation-badges">{isSelfRelationship(relationship) && <Badge variant="outline">自引用 · 图中隐藏</Badge>}<Badge variant="outline">{relationship.cardinality}</Badge></div>
     </div>
     <div className="relation-route">
       <div className={!childImported ? "missing" : ""}><span>子表 · 引用方</span><code>{relationship.childTable}</code>{!childImported && <small>未导入</small>}</div>
@@ -1053,6 +1116,8 @@ function InspectorSheet({
   onClose,
   onFocus,
   onDelete,
+  onEditField,
+  onEditTable,
 }: {
   inspector: Inspector;
   graph: ScopeGraph;
@@ -1061,6 +1126,8 @@ function InspectorSheet({
   onClose: () => void;
   onFocus: (tableName: string) => void;
   onDelete: (tableName: string) => void;
+  onEditField: (tableName: string, fieldName: string) => void;
+  onEditTable: (tableName: string) => void;
 }) {
   const tableIndex = useMemo(() => new Map(tables.map((table) => [table.tableName, table])), [tables]);
   const relationIndex = useMemo(() => new Map(relationships.map((relation) => [relationKey(relation), relation])), [relationships]);
@@ -1070,8 +1137,9 @@ function InspectorSheet({
     : [];
   const selectedGroup = inspector?.kind === "group" ? graph.nodes.find((node) => node.id === inspector.nodeId) : undefined;
   const tableName = inspector?.kind === "table" ? inspector.tableName : "";
-  const outbound = selectedTable ? relationships.filter((relation) => relation.childTable === selectedTable.tableName) : [];
-  const inbound = selectedTable ? relationships.filter((relation) => relation.parentTable === selectedTable.tableName) : [];
+  const selfRelations = selectedTable ? relationships.filter((relation) => isSelfRelationship(relation) && relation.parentTable === selectedTable.tableName) : [];
+  const outbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.childTable === selectedTable.tableName) : [];
+  const inbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.parentTable === selectedTable.tableName) : [];
   const title = inspector?.kind === "table" ? tableName : inspector?.kind === "relations" ? inspector.title : selectedGroup?.label ?? "关系详情";
 
   return <Sheet open={Boolean(inspector)} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -1079,7 +1147,7 @@ function InspectorSheet({
       <SheetHeader>
         <div className="inspector-eyebrow">{inspector?.kind === "table" ? <Table2 size={14} /> : inspector?.kind === "relations" ? <GitBranch size={14} /> : <Layers3 size={14} />}{inspector?.kind === "table" ? "表详情" : inspector?.kind === "relations" ? "关系详情" : "聚合节点"}</div>
         <SheetTitle>{title}</SheetTitle>
-        <SheetDescription>{selectedTable?.description || (selectedTable ? `${selectedTable.domain0} / ${selectedTable.domain1}` : selectedGroup?.caption || "从关系定义中读取")}</SheetDescription>
+        <SheetDescription>{selectedTable?.description || (selectedTable ? [selectedTable.domain0, selectedTable.domain1].filter(Boolean).join(" / ") : selectedGroup?.caption || "从关系定义中读取")}</SheetDescription>
       </SheetHeader>
       {inspector?.kind === "table" && !selectedTable && <div className="ghost-inspector">
         <CircleAlert size={28} /><strong>该表尚未导入</strong><p>它来自其他表的外键关系。导入对应 JSON 后，字段、域和更多上下游关系会自动补齐。</p><code>{tableName}</code>
@@ -1087,9 +1155,10 @@ function InspectorSheet({
       {selectedTable && <>
         <div className="inspector-summary">
           <div><span>字段</span><strong>{selectedTable.columns.length}</strong></div>
-          <div><span>父表</span><strong>{outbound.length}</strong></div>
-          <div><span>子表</span><strong>{inbound.length}</strong></div>
+          <div><span>我依赖</span><strong>{outbound.length}</strong></div>
+          <div><span>依赖我</span><strong>{inbound.length}</strong></div>
         </div>
+        <div className="class-summary"><div><span>对应类</span><code>{selectedTable.className}</code></div><button onClick={() => onEditTable(selectedTable.tableName)}><Settings2 size={14} />配置类</button></div>
         <div className="inspector-actions">
           <Button className="focus-from-sheet" onClick={() => onFocus(selectedTable.tableName)}><Focus size={15} />聚焦该表关系</Button>
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
@@ -1097,12 +1166,16 @@ function InspectorSheet({
         <Tabs defaultValue="relations" className="inspector-tabs">
           <TabsList><TabsTrigger value="relations">上下游</TabsTrigger><TabsTrigger value="fields">字段</TabsTrigger><TabsTrigger value="remarks">备注</TabsTrigger></TabsList>
           <TabsContent value="relations" className="inspector-relations">
-            {outbound.length > 0 && <section><h3>引用父表 <span>{outbound.length}</span></h3>{outbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
-            {inbound.length > 0 && <section><h3>被子表引用 <span>{inbound.length}</span></h3>{inbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
-            {outbound.length + inbound.length === 0 && <div className="inspector-empty">暂无外键关系</div>}
+            {outbound.length > 0 && <section><h3>我依赖谁 <span>{outbound.length}</span></h3>{outbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
+            {inbound.length > 0 && <section><h3>谁依赖我 <span>{inbound.length}</span></h3>{inbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
+            {selfRelations.length > 0 && <section><h3>本表自引用 <span>{selfRelations.length}</span></h3>{selfRelations.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
+            {outbound.length + inbound.length + selfRelations.length === 0 && <div className="inspector-empty">暂无外键关系</div>}
           </TabsContent>
           <TabsContent value="fields" className="field-table-wrap">
-            <Table><TableHeader><TableRow><TableHead>字段</TableHead><TableHead>类型</TableHead><TableHead>约束</TableHead></TableRow></TableHeader><TableBody>{selectedTable.columns.map((column) => <TableRow key={column.name}><TableCell><div className="field-name">{column.isPrimaryKey ? <KeyRound size={13} /> : <Minus size={11} />}<div><code>{column.name}</code><small>{column.description}</small></div></div></TableCell><TableCell><code>{column.dataType}</code></TableCell><TableCell>{column.isPrimaryKey ? "PK" : column.nullable ? "可空" : "必填"}</TableCell></TableRow>)}</TableBody></Table>
+            <Table><TableHeader><TableRow><TableHead>字段 / 属性</TableHead><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead className="field-actions-head">操作</TableHead></TableRow></TableHeader><TableBody>{selectedTable.columns.map((column) => {
+              const annotation = migrateColumn(column).annotation!;
+              return <TableRow key={column.name} className={!annotation.included ? "field-excluded" : ""}><TableCell><div className="field-name">{column.isPrimaryKey ? <KeyRound size={13} /> : <Minus size={11} />}<div><code>{column.name}</code><small>{annotation.entityColumn} · {column.description || "未填写字段描述"}</small></div></div></TableCell><TableCell><code>{column.dataType}</code></TableCell><TableCell><div className="field-state"><span>{column.isPrimaryKey ? "PK" : column.nullable ? "可空" : "必填"}</span>{!annotation.included && <Badge variant="outline">不导出</Badge>}{annotation.enumRef && <Badge variant="outline">枚举</Badge>}</div></TableCell><TableCell><div className="field-row-actions"><button onClick={() => onEditField(selectedTable.tableName, column.name)} aria-label={`标注 ${column.name}`}><FilePenLine size={13} /></button><button className="danger" onClick={() => onEditField(selectedTable.tableName, column.name)} aria-label={`删除 ${column.name}`} title="进入字段标注后删除"><Trash2 size={13} /></button></div></TableCell></TableRow>;
+            })}</TableBody></Table>
           </TabsContent>
           <TabsContent value="remarks" className="remark-stack">{selectedTable.columns.map((column) => <article key={column.name}><code>{column.name}</code><strong>{column.description || "未填写字段描述"}</strong><p>{column.remark || "暂无详细备注"}</p></article>)}</TabsContent>
         </Tabs>
@@ -1168,7 +1241,8 @@ function ImportDialog({
 }) {
   const previewRelations = uniqueRelationships(pending);
   const rawRelations = pending.reduce((sum, table) => sum + table.foreignKeys.length + table.referencedBy.length, 0);
-  const folders = [...new Set(pending.map((table) => table.folder || ROOT_FOLDER))];
+  const folders = [...new Set(pending.map((table) => normalizeDomain1(table.folder)).filter(Boolean))];
+  const directTables = pending.filter((table) => !normalizeDomain1(table.folder)).length;
   const downloadExample = () => {
     const blob = new Blob([JSON.stringify(jsonExample, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1183,7 +1257,7 @@ function ImportDialog({
       <DialogHeader>
         <div className="dialog-mark"><FileJson size={20} /></div>
         <DialogTitle>批量导入 PDM JSON</DialogTitle>
-        <DialogDescription>本批次只设置 0级域；每张表的 1级域自动读取 folder。</DialogDescription>
+        <DialogDescription>本批次设置 0级域；有效 folder 自动成为 1级域，空值、根目录和 DIAGRAM 1 不建立 1级域。</DialogDescription>
       </DialogHeader>
       <label
         className="json-dropzone"
@@ -1206,7 +1280,7 @@ function ImportDialog({
         <div><span>去重后</span><strong>{previewRelations.length}</strong></div>
         <div><span>未命名约束</span><strong>{previewRelations.filter((relation) => !relation.constraintName).length}</strong></div>
         <div><span>复合外键</span><strong>{previewRelations.filter((relation) => relation.columnMapping.length > 1).length}</strong></div>
-        <section><span>folder → 1级域</span><div>{folders.map((folder) => <code key={folder}>{folder}</code>)}</div></section>
+        <section><span>folder → 1级域</span><div>{folders.map((folder) => <code key={folder}>{folder}</code>)}{directTables > 0 && <code>直属 0级域：{directTables} 张</code>}</div></section>
       </div>}
       {errors.length > 0 && <div className="import-errors" role="alert">{errors.map((error) => <div key={error}><CircleAlert size={14} /><span>{error}</span></div>)}</div>}
       <DialogFooter>
@@ -1218,7 +1292,7 @@ function ImportDialog({
 }
 
 export default function Home() {
-  const [tables, setTables] = useState<SchemaTable[]>(seedTables);
+  const [tables, setTables] = useState<SchemaTable[]>(() => migrateTables(seedTables));
   const [scope, setScope] = useState<Scope>({ level: "global" });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [search, setSearch] = useState("");
@@ -1232,18 +1306,47 @@ export default function Home() {
   const [importDomain0, setImportDomain0] = useState("定价域");
   const [storageReady, setStorageReady] = useState(false);
   const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
+  const [fieldTarget, setFieldTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
+  const [fieldDeleteTarget, setFieldDeleteTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
+  const [tableConfigTarget, setTableConfigTarget] = useState<string | null>(null);
+  const [tableConfigError, setTableConfigError] = useState("");
+  const [renameTarget, setRenameTarget] = useState<
+    | { level: 0; currentName: string }
+    | { level: 1; domain0: string; currentName: string }
+    | null
+  >(null);
+  const [changeRecords, setChangeRecords] = useState<ChangeRecord[]>([]);
+  const [auditOpen, setAuditOpen] = useState(false);
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
   const graph = useMemo(() => buildScopeGraph(scope, tables, relationships, depth, direction), [scope, tables, relationships, depth, direction]);
+  const selectedFieldTable = fieldTarget ? tables.find((table) => table.tableName === fieldTarget.tableName) : undefined;
+  const selectedField = selectedFieldTable?.columns.find((column) => column.name === fieldTarget?.fieldName);
+  const selectedConfigTable = tableConfigTarget ? tables.find((table) => table.tableName === tableConfigTarget) : undefined;
+  const crossDomainCount = relationships.filter((relationship) => {
+    const parent = tables.find((table) => table.tableName === relationship.parentTable);
+    const child = tables.find((table) => table.tableName === relationship.childTable);
+    return parent && child && parent.domain0 !== child.domain0;
+  }).length;
+
+  const addChange = (record: Omit<ChangeRecord, "id" | "timestamp">) => {
+    setChangeRecords((current) => [makeChangeRecord(record), ...current].slice(0, 2000));
+  };
 
   useEffect(() => {
     let active = true;
     let restoredTables: SchemaTable[] | null = null;
+    let restoredRecords: ChangeRecord[] | null = null;
     let readFailed = false;
     try {
       const stored = window.localStorage.getItem(TABLE_STORAGE_KEY);
+      const auditStored = window.localStorage.getItem(CHANGE_LOG_STORAGE_KEY);
       if (stored !== null) {
         const restored = JSON.parse(stored) as unknown;
-        if (Array.isArray(restored)) restoredTables = restored as SchemaTable[];
+        if (Array.isArray(restored)) restoredTables = migrateTables(restored as SchemaTable[]);
+      }
+      if (auditStored !== null) {
+        const restored = JSON.parse(auditStored) as unknown;
+        if (Array.isArray(restored)) restoredRecords = restored as ChangeRecord[];
       }
     } catch {
       readFailed = true;
@@ -1251,7 +1354,8 @@ export default function Home() {
     queueMicrotask(() => {
       if (!active) return;
       if (restoredTables) setTables(restoredTables);
-      if (readFailed) toast.error("本地表数据读取失败", { description: "已使用内置示例启动，可重新导入 JSON。" });
+      if (restoredRecords) setChangeRecords(restoredRecords);
+      if (readFailed) toast.error("本地数据读取失败", { description: "已使用内置示例启动，可重新导入 JSON。" });
       setStorageReady(true);
     });
     return () => { active = false; };
@@ -1261,10 +1365,11 @@ export default function Home() {
     if (!storageReady) return;
     try {
       window.localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(tables));
+      window.localStorage.setItem(CHANGE_LOG_STORAGE_KEY, JSON.stringify(changeRecords));
     } catch {
-      toast.error("本地保存空间不足", { description: "请减少导入量或清理该站点的浏览器存储。" });
+      toast.error("本地保存空间不足", { description: "请减少导入量或导出后清理该站点的浏览器存储。" });
     }
-  }, [storageReady, tables]);
+  }, [storageReady, tables, changeRecords]);
 
   const enterScope = (next: Scope) => {
     setScope(next);
@@ -1288,23 +1393,38 @@ export default function Home() {
   };
   const importTables = () => {
     const domain0 = importDomain0.trim() || UNCLASSIFIED;
-    const next = pendingTables.map((table) => ({ ...table, domain0, domain1: table.folder || ROOT_FOLDER }));
+    const next: SchemaTable[] = pendingTables.map((table) => {
+      const domain1 = normalizeDomain1(table.folder);
+      return {
+        ...table,
+        className: defaultClassName(table.tableName),
+        classDescription: table.description,
+        classAliases: [],
+        domain0,
+        domain1,
+        folder: domain1,
+        columns: table.columns.map(migrateColumn),
+      };
+    });
     setTables((current) => {
       const merged = new Map(current.map((table) => [table.tableName, table]));
-      next.forEach((table) => merged.set(table.tableName, table));
-      return [...merged.values()].sort((a, b) => a.tableName.localeCompare(b.tableName));
+      next.forEach((table) => merged.set(table.tableName, mergeImportedTable(merged.get(table.tableName), table)));
+      return migrateTables([...merged.values()]).sort((a, b) => a.tableName.localeCompare(b.tableName));
     });
+    addChange({ action: "import_tables", label: `导入或更新 ${next.length} 张表到 ${domain0}`, after: next.map((table) => table.tableName) });
     setImportOpen(false);
     setPendingTables([]);
     setImportErrors([]);
     enterScope({ level: "global" });
-    toast.success(`已导入 ${next.length} 张表`, { description: `0级域：${domain0}；1级域已从 folder 读取。` });
+    const directCount = next.filter((table) => !table.domain1).length;
+    toast.success(`已导入 ${next.length} 张表`, { description: `0级域：${domain0}${directCount ? `；${directCount} 张表没有 1级域` : ""}。` });
   };
   const deleteTables = () => {
     if (deleteTargets.length === 0) return;
     const targets = new Set(deleteTargets);
     const deletedRelationCount = relationships.filter((relationship) => targets.has(relationship.parentTable) || targets.has(relationship.childTable)).length;
     const keepRelation = (relationship: Relationship) => !targets.has(relationship.parentTable) && !targets.has(relationship.childTable);
+    const deletedTables = tables.filter((table) => targets.has(table.tableName));
     const remaining = tables
       .filter((table) => !targets.has(table.tableName))
       .map((table) => ({
@@ -1313,22 +1433,129 @@ export default function Home() {
         referencedBy: table.referencedBy.filter(keepRelation),
       }));
     let nextScope: Scope = scope;
-    if (scope.level === "focus" && targets.has(scope.tableName)) {
-      nextScope = { level: "global" };
-    } else if (scope.level === "domain" && !remaining.some((table) => table.domain0 === scope.domain0)) {
-      nextScope = { level: "global" };
-    } else if (scope.level === "folder" && !remaining.some((table) => table.domain0 === scope.domain0 && table.domain1 === scope.domain1)) {
-      nextScope = remaining.some((table) => table.domain0 === scope.domain0)
-        ? { level: "domain", domain0: scope.domain0 }
-        : { level: "global" };
+    if (scope.level === "focus" && targets.has(scope.tableName)) nextScope = { level: "global" };
+    else if (scope.level === "domain" && !remaining.some((table) => table.domain0 === scope.domain0)) nextScope = { level: "global" };
+    else if (scope.level === "folder" && !remaining.some((table) => table.domain0 === scope.domain0 && table.domain1 === scope.domain1)) {
+      nextScope = remaining.some((table) => table.domain0 === scope.domain0) ? { level: "domain", domain0: scope.domain0 } : { level: "global" };
     }
+    deletedTables.forEach((table) => addChange({
+      action: "delete_table",
+      label: `删除表 ${table.tableName}`,
+      tableName: table.tableName,
+      before: { className: table.className, domain0: table.domain0, domain1: table.domain1, columns: table.columns.map((column) => column.name) },
+    }));
     setTables(remaining);
     setScope(nextScope);
     setCamera({ x: 0, y: 0, scale: 1 });
     setInspector(null);
     setDeleteTargets([]);
-    toast.success(`已删除 ${targets.size} 张表`, { description: `同时移除 ${deletedRelationCount} 条相关关系。` });
+    toast.success(`已删除 ${targets.size} 张表`, { description: `同时移除 ${deletedRelationCount} 条相关关系，操作已记录。` });
   };
+
+  const saveFieldAnnotation = (annotation: ColumnAnnotation) => {
+    if (!fieldTarget || !selectedField) return;
+    const before = migrateColumn(selectedField).annotation;
+    setTables((current) => current.map((table) => table.tableName !== fieldTarget.tableName ? table : {
+      ...table,
+      columns: table.columns.map((column) => column.name === fieldTarget.fieldName ? { ...column, annotation } : column),
+    }));
+    addChange({ action: "update_field", label: `更新字段标注 ${fieldTarget.tableName}.${fieldTarget.fieldName}`, tableName: fieldTarget.tableName, fieldName: fieldTarget.fieldName, before, after: annotation });
+    setFieldTarget(null);
+    toast.success("字段标注已保存");
+  };
+
+  const deleteField = () => {
+    if (!fieldDeleteTarget) return;
+    const target = fieldDeleteTarget;
+    const table = tables.find((item) => item.tableName === target.tableName);
+    const column = table?.columns.find((item) => item.name === target.fieldName);
+    if (!table || !column) return setFieldDeleteTarget(null);
+    const relationTouchesField = (relationship: Relationship) => relationship.columnMapping.some((mapping) =>
+      (relationship.parentTable === target.tableName && mapping.parentColumn === target.fieldName)
+      || (relationship.childTable === target.tableName && mapping.childColumn === target.fieldName));
+    const affected = relationships.filter(relationTouchesField).length;
+    const cleanRelations = (items: Relationship[]) => items.flatMap((relationship) => {
+      const columnMapping = relationship.columnMapping.filter((mapping) => !(
+        (relationship.parentTable === target.tableName && mapping.parentColumn === target.fieldName)
+        || (relationship.childTable === target.tableName && mapping.childColumn === target.fieldName)
+      ));
+      return columnMapping.length ? [{ ...relationship, columnMapping }] : [];
+    });
+    setTables((current) => current.map((item) => ({
+      ...item,
+      columns: item.tableName === target.tableName ? item.columns.filter((field) => field.name !== target.fieldName) : item.columns,
+      foreignKeys: cleanRelations(item.foreignKeys),
+      referencedBy: cleanRelations(item.referencedBy),
+    })));
+    addChange({ action: "delete_field", label: `删除字段 ${target.tableName}.${target.fieldName}`, tableName: target.tableName, fieldName: target.fieldName, before: column });
+    setFieldDeleteTarget(null);
+    setFieldTarget(null);
+    toast.success(`已删除字段 ${target.fieldName}`, { description: `${affected} 条相关外键映射已同步清理，操作已记录。` });
+  };
+
+  const saveTableConfig = (value: { className: string; classDescription: string; classAliases: string[] }) => {
+    if (!selectedConfigTable) return;
+    const duplicate = tables.find((table) => table.tableName !== selectedConfigTable.tableName && table.className.toLowerCase() === value.className.toLowerCase());
+    if (duplicate) return setTableConfigError(`类名已被 ${duplicate.tableName} 使用，请保持一表一类。`);
+    const before = { className: selectedConfigTable.className, classDescription: selectedConfigTable.classDescription, classAliases: selectedConfigTable.classAliases };
+    setTables((current) => current.map((table) => table.tableName === selectedConfigTable.tableName ? { ...table, ...value } : table));
+    addChange({ action: "update_class_name", label: `更新 ${selectedConfigTable.tableName} 的类信息`, tableName: selectedConfigTable.tableName, before, after: value });
+    setTableConfigTarget(null);
+    setTableConfigError("");
+    toast.success("类信息已保存");
+  };
+
+  const renameDomain = (newName: string) => {
+    if (!renameTarget) return;
+    if (renameTarget.level === 0) {
+      const before = renameTarget.currentName;
+      if (!newName || newName === before) return setRenameTarget(null);
+      setTables((current) => current.map((table) => table.domain0 === before ? { ...table, domain0: newName } : table));
+      setScope((current) => {
+        if ((current.level === "domain" || current.level === "folder") && current.domain0 === before) return { ...current, domain0: newName };
+        return current;
+      });
+      addChange({ action: "rename_domain0", label: `0级域 ${before} → ${newName}`, before, after: newName });
+    } else {
+      const { domain0, currentName } = renameTarget;
+      const normalized = normalizeDomain1(newName);
+      if (normalized === currentName) return setRenameTarget(null);
+      setTables((current) => current.map((table) => table.domain0 === domain0 && table.domain1 === currentName ? { ...table, domain1: normalized, folder: normalized } : table));
+      setScope((current) => current.level === "folder" && current.domain0 === domain0 && current.domain1 === currentName
+        ? normalized ? { level: "folder", domain0, domain1: normalized } : { level: "domain", domain0 }
+        : current);
+      addChange({ action: "rename_domain1", label: `1级域 ${currentName} → ${normalized || "无"}`, before: { domain0, domain1: currentName }, after: { domain0, domain1: normalized } });
+    }
+    setRenameTarget(null);
+    setCamera({ x: 0, y: 0, scale: 1 });
+    toast.success("域名已更新", { description: "相关表、目录和导出路径已同步。" });
+  };
+
+  const downloadBlob = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportAnnotations = () => {
+    const errors = validateExportConfiguration(tables);
+    if (errors.length) return toast.error("导出前需要修正配置", { description: errors.slice(0, 3).join("；") });
+    const files = buildExportFiles(tables);
+    const zip = createZip(files);
+    const buffer = zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength) as ArrayBuffer;
+    downloadBlob(new Blob([buffer], { type: "application/zip" }), `schema-atlas-annotations-${new Date().toISOString().slice(0, 10)}.zip`);
+    toast.success(`已导出 ${files.length} 个 JSON 文件`, { description: "包含 ontologies、rdb-mapping 及枚举目录。" });
+  };
+  const exportAudit = () => downloadBlob(new Blob([JSON.stringify(changeRecords, null, 2)], { type: "application/json" }), `schema-atlas-change-log-${new Date().toISOString().slice(0, 10)}.json`);
+
+  const deleteFieldColumn = fieldDeleteTarget
+    ? tables.find((table) => table.tableName === fieldDeleteTarget.tableName)?.columns.find((column) => column.name === fieldDeleteTarget.fieldName)
+    : undefined;
+  const deleteFieldRelations = fieldDeleteTarget ? relationships.filter((relationship) => relationship.columnMapping.some((mapping) =>
+    (relationship.parentTable === fieldDeleteTarget.tableName && mapping.parentColumn === fieldDeleteTarget.fieldName)
+    || (relationship.childTable === fieldDeleteTarget.tableName && mapping.childColumn === fieldDeleteTarget.fieldName))).length : 0;
 
   return <main className={`atlas-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <AppSidebar
@@ -1342,15 +1569,19 @@ export default function Home() {
       onScope={enterScope}
       onInspectRelations={inspectRelations}
       onRequestDelete={setDeleteTargets}
+      onRenameDomain0={(domain0) => setRenameTarget({ level: 0, currentName: domain0 })}
+      onRenameDomain1={(domain0, domain1) => setRenameTarget({ level: 1, domain0, currentName: domain1 })}
     />
     <div className="atlas-workspace">
       <header className="workspace-bar">
         <div>
           <Breadcrumbs scope={scope} tables={tables} onScope={enterScope} />
-          <div className="workspace-title"><Database size={17} /><span>表关系拓扑</span><em>从域到字段映射</em></div>
+          <div className="workspace-title"><Database size={17} /><span>表关系拓扑</span><em>从全局依赖到字段标注</em></div>
         </div>
         <div className="workspace-actions">
-          <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系</div>
+          <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域</div>
+          <Button variant="outline" onClick={() => setAuditOpen(true)}><FilePenLine size={16} />变更记录</Button>
+          <Button variant="outline" onClick={exportAnnotations}><FileArchive size={16} />导出标注</Button>
           <Button onClick={() => setImportOpen(true)}><Plus size={16} />导入 JSON</Button>
         </div>
       </header>
@@ -1376,23 +1607,18 @@ export default function Home() {
       onClose={() => setInspector(null)}
       onFocus={(tableName) => enterScope({ level: "focus", tableName })}
       onDelete={(tableName) => setDeleteTargets([tableName])}
+      onEditField={(tableName, fieldName) => setFieldTarget({ tableName, fieldName })}
+      onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
     />
-    <DeleteTablesDialog
-      tableNames={deleteTargets}
-      relationships={relationships}
-      onCancel={() => setDeleteTargets([])}
-      onConfirm={deleteTables}
-    />
-    <ImportDialog
-      open={importOpen}
-      onOpenChange={setImportOpen}
-      pending={pendingTables}
-      errors={importErrors}
-      domain0={importDomain0}
-      onDomain0={setImportDomain0}
-      onFiles={handleFiles}
-      onImport={importTables}
-    />
+    <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
+    <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
+      <AlertDialogContent className="delete-dialog"><AlertDialogHeader><div className="delete-dialog-mark"><Trash2 size={20} /></div><AlertDialogTitle>删除字段 {fieldDeleteTarget?.fieldName}？</AlertDialogTitle><AlertDialogDescription>该字段会从 {fieldDeleteTarget?.tableName} 移除，并清理 {deleteFieldRelations} 条关系中的对应列映射。删除前内容会写入变更记录。</AlertDialogDescription></AlertDialogHeader><div className="delete-table-preview"><code>{fieldDeleteTarget?.tableName}.{fieldDeleteTarget?.fieldName}</code><span>{deleteFieldColumn?.description || "暂无字段说明"}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setFieldDeleteTarget(null)}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={deleteField}><Trash2 size={14} />确认删除字段</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+    </AlertDialog>
+    <ImportDialog open={importOpen} onOpenChange={setImportOpen} pending={pendingTables} errors={importErrors} domain0={importDomain0} onDomain0={setImportDomain0} onFiles={handleFiles} onImport={importTables} />
+    <FieldEditorDialog open={Boolean(fieldTarget && selectedFieldTable && selectedField)} table={selectedFieldTable} column={selectedField} onOpenChange={(open) => { if (!open) setFieldTarget(null); }} onSave={saveFieldAnnotation} onDelete={() => { if (fieldTarget) setFieldDeleteTarget(fieldTarget); setFieldTarget(null); }} />
+    <TableConfigDialog open={Boolean(tableConfigTarget && selectedConfigTable)} table={selectedConfigTable} error={tableConfigError} onOpenChange={(open) => { if (!open) { setTableConfigTarget(null); setTableConfigError(""); } }} onSave={saveTableConfig} />
+    <RenameDomainDialog open={Boolean(renameTarget)} level={renameTarget?.level ?? 0} currentName={renameTarget?.currentName ?? ""} onOpenChange={(open) => { if (!open) setRenameTarget(null); }} onSave={renameDomain} />
+    <AuditLogSheet open={auditOpen} records={changeRecords} onOpenChange={setAuditOpen} onDownload={exportAudit} />
     <Toaster position="bottom-right" />
   </main>;
 }

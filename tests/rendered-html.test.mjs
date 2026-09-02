@@ -29,4 +29,7 @@ test("renders the app shell and catalog delete entry", async () => {
   const html = await response.text();
   assert.match(html, /<title>Schema Atlas · 表关系探索器<\/title>/);
   assert.match(html, /aria-label="删除 PE_PLAN_POLICY"/);
+  assert.match(html, />变更记录</);
+  assert.match(html, />导出标注</);
+  assert.match(html, /我依赖谁 · 子表/);
 });
