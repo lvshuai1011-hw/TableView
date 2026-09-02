@@ -77,7 +77,7 @@ kill "$(cat schema-atlas.pid)"
 
 - 类名、详细中文描述、多个类别名
 - 字段是否导出、`attr_name`、多个别名和详细中文描述
-- `is_local_id`、`is_display_name`、`is_semantic`；值为 `false` 时不写入导出 JSON
+- `is_local_id`、`is_display_name`、`is_semantic`、`is_code`；值为 `false` 时不写入导出 JSON
 - 枚举引用 `enum_ref`、枚举说明、取值、中文说明、英文说明和别名
 - 辅助治理信息：语义角色、单位、范围、标签、敏感级别（本地保留）
 

@@ -119,6 +119,7 @@ test("normalizes missing level-one domains and exports the requested ontology la
         isLocalId: true,
         isDisplayName: false,
         isSemantic: false,
+        isCode: true,
         semanticRole: "identifier",
         tags: [],
         unit: "",
@@ -142,6 +143,7 @@ test("normalizes missing level-one domains and exports the requested ontology la
   const ontology = JSON.parse(files[0].content);
   assert.equal(ontology.attributes[0].data_type, "number");
   assert.equal(ontology.attributes[0].is_local_id, true);
+  assert.equal(ontology.attributes[0].is_code, true);
   assert.equal(ontology.attributes[0].attr_name, "freeUnitInstanceID");
   const zip = createZip(files);
   assert.deepEqual([...zip.slice(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
@@ -174,6 +176,7 @@ test("writes enum references and definitions as separate files", async () => {
         isLocalId: false,
         isDisplayName: false,
         isSemantic: false,
+        isCode: false,
         semanticRole: "code",
         tags: [],
         unit: "",
@@ -193,5 +196,6 @@ test("writes enum references and definitions as separate files", async () => {
   const enumFile = JSON.parse(files[2].content);
   assert.equal(ontology.attributes[0].enum_ref, "QuotaCycleType");
   assert.equal(ontology.attributes[0].is_local_id, undefined);
+  assert.equal(ontology.attributes[0].is_code, undefined);
   assert.equal(enumFile.values[0].description_en, "Daily limit");
 });

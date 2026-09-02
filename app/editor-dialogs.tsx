@@ -96,6 +96,7 @@ function FieldEditorForm({
           <label><Switch checked={draft.isLocalId} onCheckedChange={(checked) => update("isLocalId", checked)} /><span><strong>is_local_id</strong><small>false 时不导出</small></span></label>
           <label><Switch checked={draft.isDisplayName} onCheckedChange={(checked) => update("isDisplayName", checked)} /><span><strong>is_display_name</strong><small>作为对象显示名称</small></span></label>
           <label><Switch checked={draft.isSemantic} onCheckedChange={(checked) => update("isSemantic", checked)} /><span><strong>is_semantic</strong><small>参与语义理解</small></span></label>
+          <label><Switch checked={draft.isCode} onCheckedChange={(checked) => update("isCode", checked)} /><span><strong>is_code</strong><small>标识编码类属性</small></span></label>
         </div>
       </section>
 

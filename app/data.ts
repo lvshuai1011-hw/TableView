@@ -28,6 +28,7 @@ export type ColumnAnnotation = {
   isLocalId: boolean;
   isDisplayName: boolean;
   isSemantic: boolean;
+  isCode: boolean;
   semanticRole: SemanticRole;
   tags: string[];
   unit: string;

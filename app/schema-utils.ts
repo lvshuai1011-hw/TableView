@@ -62,6 +62,7 @@ export function createDefaultAnnotation(column: Pick<Column, "name">): ColumnAnn
     isLocalId: false,
     isDisplayName: false,
     isSemantic: false,
+    isCode: false,
     semanticRole: inferSemanticRole(column.name),
     tags: [],
     unit: "",
@@ -107,6 +108,7 @@ export function migrateColumn(column: Column): Column {
       isLocalId: source?.isLocalId === true,
       isDisplayName: source?.isDisplayName === true,
       isSemantic: source?.isSemantic === true,
+      isCode: source?.isCode === true,
       semanticRole: semanticRoles.includes(source?.semanticRole as SemanticRole) ? source!.semanticRole as SemanticRole : defaults.semanticRole,
       tags: stringArray(source?.tags),
       unit: typeof source?.unit === "string" ? source.unit.trim() : "",
@@ -263,6 +265,7 @@ export function buildExportFiles(tables: SchemaTable[]): ExportFile[] {
           is_local_id: annotation.isLocalId || undefined,
           is_display_name: annotation.isDisplayName || undefined,
           is_semantic: annotation.isSemantic || undefined,
+          is_code: annotation.isCode || undefined,
           aliases: annotation.aliases,
           description: annotation.detailedDescription || column.remark || column.description,
         });
