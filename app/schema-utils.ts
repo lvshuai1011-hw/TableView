@@ -11,7 +11,8 @@ import {
   UNCLASSIFIED,
 } from "./data";
 
-export const CHANGE_LOG_STORAGE_KEY = "schema-atlas.change-log.v1";
+export const CHANGE_LOG_STORAGE_KEY = "schema-atlas.change-log.v2";
+export const LEGACY_CHANGE_LOG_STORAGE_KEY = "schema-atlas.change-log.v1";
 
 const PLACEHOLDER_FOLDERS = new Set(["", ROOT_FOLDER.toUpperCase(), "DIAGRAM 1", "DIAGRAM_1", "DIAGRAM-1"]);
 
@@ -419,8 +420,17 @@ export type ChangeAction =
   | "delete_field"
   | "update_field"
   | "update_class_name"
+  | "update_relationship"
   | "rename_domain0"
   | "rename_domain1";
+
+export type TableAuditSnapshot = {
+  tableName: string;
+  className: string;
+  description: string;
+  domain0: string;
+  domain1: string;
+};
 
 export type ChangeRecord = {
   id: string;
@@ -429,13 +439,170 @@ export type ChangeRecord = {
   label: string;
   tableName?: string;
   fieldName?: string;
+  tableSnapshot?: TableAuditSnapshot;
   before?: unknown;
   after?: unknown;
 };
 
-export function makeChangeRecord(record: Omit<ChangeRecord, "id" | "timestamp">): ChangeRecord {
+export type ChangeRecordDraft = Omit<ChangeRecord, "id" | "timestamp">;
+
+export type ChangeHistoryStore = {
+  version: 2;
+  tables: Record<string, ChangeRecord[]>;
+  system: ChangeRecord[];
+};
+
+export function createEmptyChangeHistory(): ChangeHistoryStore {
+  return { version: 2, tables: {}, system: [] };
+}
+
+export function makeTableAuditSnapshot(table: SchemaTable): TableAuditSnapshot {
+  return {
+    tableName: table.tableName,
+    className: table.className,
+    description: table.description,
+    domain0: table.domain0,
+    domain1: table.domain1,
+  };
+}
+
+export function makeChangeRecord(record: ChangeRecordDraft): ChangeRecord {
   const id = typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return { id, timestamp: new Date().toISOString(), ...record };
+}
+
+export function appendChangeRecords(history: ChangeHistoryStore, drafts: ChangeRecordDraft[]): ChangeHistoryStore {
+  const tables = Object.fromEntries(Object.entries(history.tables).map(([tableName, records]) => [tableName, [...records]]));
+  let system = [...history.system];
+  drafts.forEach((draft) => {
+    const record = makeChangeRecord(draft);
+    if (record.tableName) tables[record.tableName] = [record, ...(tables[record.tableName] ?? [])].slice(0, 1000);
+    else system = [record, ...system].slice(0, 2000);
+  });
+  return { version: 2, tables, system };
+}
+
+const CHANGE_ACTIONS = new Set<ChangeAction>([
+  "import_tables",
+  "delete_table",
+  "delete_field",
+  "update_field",
+  "update_class_name",
+  "update_relationship",
+  "rename_domain0",
+  "rename_domain1",
+]);
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function snapshotFromUnknown(value: unknown, tableName: string): TableAuditSnapshot | undefined {
+  const source = objectValue(value);
+  if (!source) return undefined;
+  return {
+    tableName,
+    className: typeof source.className === "string" ? source.className : "",
+    description: typeof source.description === "string" ? source.description : "",
+    domain0: typeof source.domain0 === "string" ? source.domain0 : "",
+    domain1: typeof source.domain1 === "string" ? source.domain1 : "",
+  };
+}
+
+function migrateChangeRecord(
+  value: unknown,
+  tableIndex: Map<string, SchemaTable>,
+  salt: string,
+  tableNameOverride?: string,
+  forceSystem = false,
+): ChangeRecord | undefined {
+  const source = objectValue(value);
+  if (!source || typeof source.action !== "string" || !CHANGE_ACTIONS.has(source.action as ChangeAction)) return undefined;
+  const tableName = forceSystem
+    ? undefined
+    : tableNameOverride || (typeof source.tableName === "string" && source.tableName.trim() ? source.tableName.trim() : undefined);
+  const timestamp = typeof source.timestamp === "string" && source.timestamp ? source.timestamp : new Date().toISOString();
+  const table = tableName ? tableIndex.get(tableName) : undefined;
+  const tableSnapshot = tableName
+    ? snapshotFromUnknown(source.tableSnapshot, tableName)
+      ?? (table ? makeTableAuditSnapshot(table) : snapshotFromUnknown(source.before, tableName))
+      ?? { tableName, className: "", description: "", domain0: "", domain1: "" }
+    : undefined;
+  return {
+    id: typeof source.id === "string" && source.id ? `${source.id}${tableNameOverride && typeof source.tableName !== "string" ? `:${tableNameOverride}` : ""}` : `legacy-${timestamp}-${salt}`,
+    timestamp,
+    action: source.action as ChangeAction,
+    label: typeof source.label === "string" && source.label ? source.label : "历史变更",
+    ...(tableName ? { tableName, tableSnapshot } : {}),
+    ...(typeof source.fieldName === "string" && source.fieldName ? { fieldName: source.fieldName } : {}),
+    ...(Object.prototype.hasOwnProperty.call(source, "before") ? { before: source.before } : {}),
+    ...(Object.prototype.hasOwnProperty.call(source, "after") ? { after: source.after } : {}),
+  };
+}
+
+function addMigratedRecord(history: ChangeHistoryStore, record: ChangeRecord) {
+  if (record.tableName) history.tables[record.tableName] = [...(history.tables[record.tableName] ?? []), record];
+  else history.system.push(record);
+}
+
+export function migrateChangeHistory(value: unknown, tables: SchemaTable[] = []): ChangeHistoryStore {
+  const history = createEmptyChangeHistory();
+  const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
+  const source = objectValue(value);
+
+  if (source?.version === 2) {
+    const storedTables = objectValue(source.tables);
+    Object.entries(storedTables ?? {}).forEach(([tableName, records], tableIndexPosition) => {
+      if (!Array.isArray(records)) return;
+      records.forEach((record, recordIndex) => {
+        const migrated = migrateChangeRecord(record, tableIndex, `${tableIndexPosition}-${recordIndex}`, tableName);
+        if (migrated) addMigratedRecord(history, migrated);
+      });
+    });
+    if (Array.isArray(source.system)) source.system.forEach((record, index) => {
+      const migrated = migrateChangeRecord(record, tableIndex, `system-${index}`, undefined, true);
+      if (migrated) addMigratedRecord(history, migrated);
+    });
+    return history;
+  }
+
+  if (!Array.isArray(value)) return history;
+  value.forEach((record, recordIndex) => {
+    const raw = objectValue(record);
+    const importedTables = raw?.action === "import_tables" && typeof raw.tableName !== "string"
+      ? stringArray(raw.after)
+      : [];
+    if (importedTables.length > 0) {
+      importedTables.forEach((tableName, tableIndexPosition) => {
+        const migrated = migrateChangeRecord({ ...raw, label: `导入或更新表 ${tableName}` }, tableIndex, `${recordIndex}-${tableIndexPosition}`, tableName);
+        if (migrated) addMigratedRecord(history, migrated);
+      });
+      return;
+    }
+    const migrated = migrateChangeRecord(record, tableIndex, `${recordIndex}`);
+    if (migrated) addMigratedRecord(history, migrated);
+  });
+  return history;
+}
+
+export function getTableChangeRecords(history: ChangeHistoryStore, tableName: string) {
+  return history.tables[tableName] ?? [];
+}
+
+export function countChangeRecords(history: ChangeHistoryStore) {
+  return Object.values(history.tables).reduce((total, records) => total + records.length, 0) + history.system.length;
+}
+
+export function buildChangeHistoryExport(history: ChangeHistoryStore) {
+  const tables = Object.entries(history.tables)
+    .filter(([, records]) => records.length > 0)
+    .sort(([, left], [, right]) => (right[0]?.timestamp ?? "").localeCompare(left[0]?.timestamp ?? ""))
+    .map(([tableName, changes]) => ({
+      table: changes.find((record) => record.tableSnapshot)?.tableSnapshot ?? { tableName, className: "", description: "", domain0: "", domain1: "" },
+      deleted: changes[0]?.action === "delete_table",
+      changes,
+    }));
+  return { schemaVersion: 2, tables, systemChanges: history.system };
 }

@@ -259,3 +259,63 @@ test("reports missing relationship fields separately from excluded export fields
   assert.equal(isMissingRelationField(excludedState), false);
   assert.equal(countRelationshipFieldGaps([excluded], tables), 0);
 });
+
+test("stores table history independently and migrates the legacy flat log", async () => {
+  const {
+    appendChangeRecords,
+    buildChangeHistoryExport,
+    makeTableAuditSnapshot,
+    migrateChangeHistory,
+    migrateTables,
+  } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const tables = migrateTables(["TABLE_A", "TABLE_B"].map((tableName) => ({
+    tableName,
+    description: `${tableName} description`,
+    folder: "",
+    domain0: "Demo",
+    domain1: "",
+    columns: [{ name: "ID", description: "", dataType: "NUMBER(20)", length: "20", isPrimaryKey: true, nullable: false, remark: "" }],
+    foreignKeys: [],
+    referencedBy: [],
+  })));
+  const legacy = [{
+    id: "legacy-import",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    action: "import_tables",
+    label: "导入两张表",
+    after: ["TABLE_A", "TABLE_B"],
+  }, {
+    id: "legacy-domain",
+    timestamp: "2026-01-02T00:00:00.000Z",
+    action: "rename_domain0",
+    label: "0级域 Old → Demo",
+  }];
+
+  const migrated = migrateChangeHistory(legacy, tables);
+  assert.equal(migrated.tables.TABLE_A.length, 1);
+  assert.equal(migrated.tables.TABLE_B.length, 1);
+  assert.equal(migrated.system.length, 1);
+  assert.equal(migrated.tables.TABLE_A[0].tableSnapshot.className, tables[0].className);
+
+  const restored = migrateChangeHistory(JSON.parse(JSON.stringify(migrated)), tables);
+  assert.equal(restored.tables.TABLE_A[0].id, migrated.tables.TABLE_A[0].id);
+
+  const history = appendChangeRecords(restored, [{
+    action: "delete_field",
+    label: "删除字段 TABLE_A.ID",
+    tableName: "TABLE_A",
+    fieldName: "ID",
+    tableSnapshot: makeTableAuditSnapshot(tables[0]),
+  }, {
+    action: "rename_domain1",
+    label: "1级域 A → B",
+  }]);
+  assert.equal(history.tables.TABLE_A.length, 2);
+  assert.equal(history.tables.TABLE_B.length, 1);
+  assert.equal(history.system.length, 2);
+
+  const exported = buildChangeHistoryExport(history);
+  assert.equal(exported.schemaVersion, 2);
+  assert.deepEqual(exported.tables.map((group) => group.table.tableName).sort(), ["TABLE_A", "TABLE_B"]);
+  assert.equal(exported.systemChanges.length, 2);
+});

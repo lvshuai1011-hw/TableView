@@ -94,22 +94,30 @@ import {
 } from "./data";
 import {
   AuditLogSheet,
+  ChangeRecordList,
   FieldEditorDialog,
   RenameDomainDialog,
   TableConfigDialog,
 } from "./editor-dialogs";
 import {
+  appendChangeRecords,
+  buildChangeHistoryExport,
   buildExportFiles,
   CHANGE_LOG_STORAGE_KEY,
-  ChangeRecord,
+  ChangeHistoryStore,
+  ChangeRecordDraft,
   countRelationshipFieldGaps,
+  createEmptyChangeHistory,
   createZip,
   defaultClassName,
+  getTableChangeRecords,
   isSelfRelationship,
   inspectRelationshipMappings,
   isMissingRelationField,
-  makeChangeRecord,
+  LEGACY_CHANGE_LOG_STORAGE_KEY,
+  makeTableAuditSnapshot,
   mergeImportedTable,
+  migrateChangeHistory,
   migrateColumn,
   migrateTables,
   normalizeDomain1,
@@ -186,6 +194,26 @@ function uniqueRelationships(tables: Pick<SchemaTable, "foreignKeys" | "referenc
     });
   });
   return [...result.values()];
+}
+
+function tableAuditState(table: SchemaTable) {
+  return {
+    className: table.className,
+    description: table.description,
+    domain0: table.domain0,
+    domain1: table.domain1,
+    columns: table.columns.map((column) => column.name),
+    relationshipCount: uniqueRelationships([table]).length,
+  };
+}
+
+function relationshipNeighbors(tableName: string, relationships: Relationship[]) {
+  const names = new Set<string>();
+  relationships.forEach((relationship) => {
+    if (relationship.parentTable === tableName && relationship.childTable !== tableName) names.add(relationship.childTable);
+    if (relationship.childTable === tableName && relationship.parentTable !== tableName) names.add(relationship.parentTable);
+  });
+  return [...names];
 }
 
 function requiredString(data: Record<string, unknown>, key: string, context: string, allowEmpty = false) {
@@ -1140,21 +1168,25 @@ function InspectorSheet({
   graph,
   tables,
   relationships,
+  changeHistory,
   onClose,
   onFocus,
   onDelete,
   onEditField,
   onEditTable,
+  onExportChanges,
 }: {
   inspector: Inspector;
   graph: ScopeGraph;
   tables: SchemaTable[];
   relationships: Relationship[];
+  changeHistory: ChangeHistoryStore;
   onClose: () => void;
   onFocus: (tableName: string) => void;
   onDelete: (tableName: string) => void;
   onEditField: (tableName: string, fieldName: string) => void;
   onEditTable: (tableName: string) => void;
+  onExportChanges: (tableName: string) => void;
 }) {
   const tableIndex = useMemo(() => new Map(tables.map((table) => [table.tableName, table])), [tables]);
   const relationIndex = useMemo(() => new Map(relationships.map((relation) => [relationKey(relation), relation])), [relationships]);
@@ -1167,6 +1199,7 @@ function InspectorSheet({
   const selfRelations = selectedTable ? relationships.filter((relation) => isSelfRelationship(relation) && relation.parentTable === selectedTable.tableName) : [];
   const outbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.childTable === selectedTable.tableName) : [];
   const inbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.parentTable === selectedTable.tableName) : [];
+  const tableChanges = selectedTable ? getTableChangeRecords(changeHistory, selectedTable.tableName) : [];
   const title = inspector?.kind === "table" ? tableName : inspector?.kind === "relations" ? inspector.title : selectedGroup?.label ?? "关系详情";
 
   return <Sheet open={Boolean(inspector)} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -1191,7 +1224,7 @@ function InspectorSheet({
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
         </div>
         <Tabs defaultValue="relations" className="inspector-tabs">
-          <TabsList><TabsTrigger value="relations">上下游</TabsTrigger><TabsTrigger value="fields">字段</TabsTrigger><TabsTrigger value="remarks">备注</TabsTrigger></TabsList>
+          <TabsList><TabsTrigger value="relations">上下游</TabsTrigger><TabsTrigger value="fields">字段</TabsTrigger><TabsTrigger value="remarks">备注</TabsTrigger><TabsTrigger value="changes">变更 <span>{tableChanges.length}</span></TabsTrigger></TabsList>
           <TabsContent value="relations" className="inspector-relations">
             {outbound.length > 0 && <section><h3>我依赖谁 <span>{outbound.length}</span></h3>{outbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
             {inbound.length > 0 && <section><h3>谁依赖我 <span>{inbound.length}</span></h3>{inbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
@@ -1205,6 +1238,10 @@ function InspectorSheet({
             })}</TableBody></Table>
           </TabsContent>
           <TabsContent value="remarks" className="remark-stack">{selectedTable.columns.map((column) => <article key={column.name}><code>{column.name}</code><strong>{column.description || "未填写字段描述"}</strong><p>{column.remark || "暂无详细备注"}</p></article>)}</TabsContent>
+          <TabsContent value="changes" className="table-change-history">
+            <div className="table-change-toolbar"><div><strong>本表历史</strong><span>导入、类配置、字段与关联外键变更</span></div><Button variant="outline" size="sm" disabled={tableChanges.length === 0} onClick={() => onExportChanges(selectedTable.tableName)}><Download size={13} />导出本表</Button></div>
+            <ChangeRecordList records={tableChanges} emptyText="这张表还没有变更记录" />
+          </TabsContent>
         </Tabs>
       </>}
       {inspector?.kind === "relations" && <div className="relation-sheet-list">{selectedRelations.map((relationship) => <RelationDetail key={relationKey(relationship)} relationship={relationship} tableIndex={tableIndex} />)}</div>}
@@ -1342,7 +1379,7 @@ export default function Home() {
     | { level: 1; domain0: string; currentName: string }
     | null
   >(null);
-  const [changeRecords, setChangeRecords] = useState<ChangeRecord[]>([]);
+  const [changeHistory, setChangeHistory] = useState<ChangeHistoryStore>(() => createEmptyChangeHistory());
   const [auditOpen, setAuditOpen] = useState(false);
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
   const fieldGapCount = useMemo(() => countRelationshipFieldGaps(relationships, tables), [relationships, tables]);
@@ -1356,25 +1393,23 @@ export default function Home() {
     return parent && child && parent.domain0 !== child.domain0;
   }).length;
 
-  const addChange = (record: Omit<ChangeRecord, "id" | "timestamp">) => {
-    setChangeRecords((current) => [makeChangeRecord(record), ...current].slice(0, 2000));
-  };
+  const addChanges = (records: ChangeRecordDraft[]) => setChangeHistory((current) => appendChangeRecords(current, records));
 
   useEffect(() => {
     let active = true;
     let restoredTables: SchemaTable[] | null = null;
-    let restoredRecords: ChangeRecord[] | null = null;
+    let restoredHistory: ChangeHistoryStore | null = null;
     let readFailed = false;
     try {
       const stored = window.localStorage.getItem(TABLE_STORAGE_KEY);
-      const auditStored = window.localStorage.getItem(CHANGE_LOG_STORAGE_KEY);
+      const auditStored = window.localStorage.getItem(CHANGE_LOG_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_CHANGE_LOG_STORAGE_KEY);
       if (stored !== null) {
         const restored = JSON.parse(stored) as unknown;
         if (Array.isArray(restored)) restoredTables = migrateTables(restored as SchemaTable[]);
       }
       if (auditStored !== null) {
         const restored = JSON.parse(auditStored) as unknown;
-        if (Array.isArray(restored)) restoredRecords = restored as ChangeRecord[];
+        restoredHistory = migrateChangeHistory(restored, restoredTables ?? migrateTables(seedTables));
       }
     } catch {
       readFailed = true;
@@ -1382,7 +1417,7 @@ export default function Home() {
     queueMicrotask(() => {
       if (!active) return;
       if (restoredTables) setTables(restoredTables);
-      if (restoredRecords) setChangeRecords(restoredRecords);
+      if (restoredHistory) setChangeHistory(restoredHistory);
       if (readFailed) toast.error("本地数据读取失败", { description: "已使用内置示例启动，可重新导入 JSON。" });
       setStorageReady(true);
     });
@@ -1393,11 +1428,11 @@ export default function Home() {
     if (!storageReady) return;
     try {
       window.localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(tables));
-      window.localStorage.setItem(CHANGE_LOG_STORAGE_KEY, JSON.stringify(changeRecords));
+      window.localStorage.setItem(CHANGE_LOG_STORAGE_KEY, JSON.stringify(changeHistory));
     } catch {
       toast.error("本地保存空间不足", { description: "请减少导入量或导出后清理该站点的浏览器存储。" });
     }
-  }, [storageReady, tables, changeRecords]);
+  }, [storageReady, tables, changeHistory]);
 
   const enterScope = (next: Scope) => {
     setScope(next);
@@ -1421,7 +1456,7 @@ export default function Home() {
   };
   const importTables = () => {
     const domain0 = importDomain0.trim() || UNCLASSIFIED;
-    const next: SchemaTable[] = pendingTables.map((table) => {
+    const prepared: SchemaTable[] = pendingTables.map((table) => {
       const domain1 = normalizeDomain1(table.folder);
       return {
         ...table,
@@ -1434,12 +1469,24 @@ export default function Home() {
         columns: table.columns.map(migrateColumn),
       };
     });
+    const existingIndex = new Map(tables.map((table) => [table.tableName, table]));
+    const next = prepared.map((table) => mergeImportedTable(existingIndex.get(table.tableName), table));
     setTables((current) => {
       const merged = new Map(current.map((table) => [table.tableName, table]));
-      next.forEach((table) => merged.set(table.tableName, mergeImportedTable(merged.get(table.tableName), table)));
+      next.forEach((table) => merged.set(table.tableName, table));
       return migrateTables([...merged.values()]).sort((a, b) => a.tableName.localeCompare(b.tableName));
     });
-    addChange({ action: "import_tables", label: `导入或更新 ${next.length} 张表到 ${domain0}`, after: next.map((table) => table.tableName) });
+    addChanges(next.map((table) => {
+      const before = existingIndex.get(table.tableName);
+      return {
+        action: "import_tables",
+        label: `${before ? "更新" : "导入"}表 ${table.tableName}`,
+        tableName: table.tableName,
+        tableSnapshot: makeTableAuditSnapshot(table),
+        ...(before ? { before: tableAuditState(before) } : {}),
+        after: tableAuditState(table),
+      };
+    }));
     setImportOpen(false);
     setPendingTables([]);
     setImportErrors([]);
@@ -1450,7 +1497,8 @@ export default function Home() {
   const deleteTables = () => {
     if (deleteTargets.length === 0) return;
     const targets = new Set(deleteTargets);
-    const deletedRelationCount = relationships.filter((relationship) => targets.has(relationship.parentTable) || targets.has(relationship.childTable)).length;
+    const affectedRelations = relationships.filter((relationship) => targets.has(relationship.parentTable) || targets.has(relationship.childTable));
+    const deletedRelationCount = affectedRelations.length;
     const keepRelation = (relationship: Relationship) => !targets.has(relationship.parentTable) && !targets.has(relationship.childTable);
     const deletedTables = tables.filter((table) => targets.has(table.tableName));
     const remaining = tables
@@ -1466,12 +1514,34 @@ export default function Home() {
     else if (scope.level === "folder" && !remaining.some((table) => table.domain0 === scope.domain0 && table.domain1 === scope.domain1)) {
       nextScope = remaining.some((table) => table.domain0 === scope.domain0) ? { level: "domain", domain0: scope.domain0 } : { level: "global" };
     }
-    deletedTables.forEach((table) => addChange({
+    const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
+    const auditDrafts: ChangeRecordDraft[] = deletedTables.map((table) => ({
       action: "delete_table",
       label: `删除表 ${table.tableName}`,
       tableName: table.tableName,
-      before: { className: table.className, domain0: table.domain0, domain1: table.domain1, columns: table.columns.map((column) => column.name) },
+      tableSnapshot: makeTableAuditSnapshot(table),
+      before: { ...tableAuditState(table), relationships: affectedRelations.filter((relationship) => relationship.parentTable === table.tableName || relationship.childTable === table.tableName) },
     }));
+    const cleanupByTable = new Map<string, Relationship[]>();
+    affectedRelations.forEach((relationship) => {
+      [relationship.parentTable, relationship.childTable].forEach((tableName) => {
+        if (targets.has(tableName) || !tableIndex.has(tableName)) return;
+        const current = cleanupByTable.get(tableName) ?? [];
+        if (!current.some((item) => relationKey(item) === relationKey(relationship))) cleanupByTable.set(tableName, [...current, relationship]);
+      });
+    });
+    cleanupByTable.forEach((related, tableName) => {
+      const table = tableIndex.get(tableName)!;
+      auditDrafts.push({
+        action: "update_relationship",
+        label: `因删除${targets.size === 1 ? `表 ${deleteTargets[0]}` : ` ${targets.size} 张关联表`}，清理 ${related.length} 条外键关系`,
+        tableName,
+        tableSnapshot: makeTableAuditSnapshot(table),
+        before: related,
+        after: [],
+      });
+    });
+    addChanges(auditDrafts);
     setTables(remaining);
     setScope(nextScope);
     setCamera({ x: 0, y: 0, scale: 1 });
@@ -1481,13 +1551,13 @@ export default function Home() {
   };
 
   const saveFieldAnnotation = (annotation: ColumnAnnotation) => {
-    if (!fieldTarget || !selectedField) return;
+    if (!fieldTarget || !selectedField || !selectedFieldTable) return;
     const before = migrateColumn(selectedField).annotation;
     setTables((current) => current.map((table) => table.tableName !== fieldTarget.tableName ? table : {
       ...table,
       columns: table.columns.map((column) => column.name === fieldTarget.fieldName ? { ...column, annotation } : column),
     }));
-    addChange({ action: "update_field", label: `更新字段标注 ${fieldTarget.tableName}.${fieldTarget.fieldName}`, tableName: fieldTarget.tableName, fieldName: fieldTarget.fieldName, before, after: annotation });
+    addChanges([{ action: "update_field", label: `更新字段标注 ${fieldTarget.tableName}.${fieldTarget.fieldName}`, tableName: fieldTarget.tableName, fieldName: fieldTarget.fieldName, tableSnapshot: makeTableAuditSnapshot(selectedFieldTable), before, after: annotation }]);
     setFieldTarget(null);
     toast.success("字段标注已保存");
   };
@@ -1501,7 +1571,8 @@ export default function Home() {
     const relationTouchesField = (relationship: Relationship) => relationship.columnMapping.some((mapping) =>
       (relationship.parentTable === target.tableName && mapping.parentColumn === target.fieldName)
       || (relationship.childTable === target.tableName && mapping.childColumn === target.fieldName));
-    const affected = relationships.filter(relationTouchesField).length;
+    const affectedRelations = relationships.filter(relationTouchesField);
+    const affected = affectedRelations.length;
     const cleanRelations = (items: Relationship[]) => items.flatMap((relationship) => {
       const columnMapping = relationship.columnMapping.filter((mapping) => !(
         (relationship.parentTable === target.tableName && mapping.parentColumn === target.fieldName)
@@ -1515,7 +1586,29 @@ export default function Home() {
       foreignKeys: cleanRelations(item.foreignKeys),
       referencedBy: cleanRelations(item.referencedBy),
     })));
-    addChange({ action: "delete_field", label: `删除字段 ${target.tableName}.${target.fieldName}`, tableName: target.tableName, fieldName: target.fieldName, before: column });
+    const tableIndex = new Map(tables.map((item) => [item.tableName, item]));
+    const auditDrafts: ChangeRecordDraft[] = [{
+      action: "delete_field",
+      label: `删除字段 ${target.tableName}.${target.fieldName}`,
+      tableName: target.tableName,
+      fieldName: target.fieldName,
+      tableSnapshot: makeTableAuditSnapshot(table),
+      before: { column, relationships: affectedRelations },
+    }];
+    relationshipNeighbors(target.tableName, affectedRelations).forEach((tableName) => {
+      const relatedTable = tableIndex.get(tableName);
+      if (!relatedTable) return;
+      const related = affectedRelations.filter((relationship) => relationship.parentTable === tableName || relationship.childTable === tableName);
+      auditDrafts.push({
+        action: "update_relationship",
+        label: `因删除 ${target.tableName}.${target.fieldName}，更新 ${related.length} 条关联外键`,
+        tableName,
+        tableSnapshot: makeTableAuditSnapshot(relatedTable),
+        before: related,
+        after: cleanRelations(related),
+      });
+    });
+    addChanges(auditDrafts);
     setFieldDeleteTarget(null);
     setFieldTarget(null);
     toast.success(`已删除字段 ${target.fieldName}`, { description: `${affected} 条相关外键映射已同步清理，操作已记录。` });
@@ -1527,7 +1620,7 @@ export default function Home() {
     if (duplicate) return setTableConfigError(`类名已被 ${duplicate.tableName} 使用，请保持一表一类。`);
     const before = { className: selectedConfigTable.className, classDescription: selectedConfigTable.classDescription, classAliases: selectedConfigTable.classAliases };
     setTables((current) => current.map((table) => table.tableName === selectedConfigTable.tableName ? { ...table, ...value } : table));
-    addChange({ action: "update_class_name", label: `更新 ${selectedConfigTable.tableName} 的类信息`, tableName: selectedConfigTable.tableName, before, after: value });
+    addChanges([{ action: "update_class_name", label: `更新 ${selectedConfigTable.tableName} 的类信息`, tableName: selectedConfigTable.tableName, tableSnapshot: makeTableAuditSnapshot({ ...selectedConfigTable, ...value }), before, after: value }]);
     setTableConfigTarget(null);
     setTableConfigError("");
     toast.success("类信息已保存");
@@ -1543,7 +1636,7 @@ export default function Home() {
         if ((current.level === "domain" || current.level === "folder") && current.domain0 === before) return { ...current, domain0: newName };
         return current;
       });
-      addChange({ action: "rename_domain0", label: `0级域 ${before} → ${newName}`, before, after: newName });
+      addChanges([{ action: "rename_domain0", label: `0级域 ${before} → ${newName}`, before, after: { domain0: newName, affectedTables: tables.filter((table) => table.domain0 === before).map((table) => table.tableName) } }]);
     } else {
       const { domain0, currentName } = renameTarget;
       const normalized = normalizeDomain1(newName);
@@ -1552,7 +1645,7 @@ export default function Home() {
       setScope((current) => current.level === "folder" && current.domain0 === domain0 && current.domain1 === currentName
         ? normalized ? { level: "folder", domain0, domain1: normalized } : { level: "domain", domain0 }
         : current);
-      addChange({ action: "rename_domain1", label: `1级域 ${currentName} → ${normalized || "无"}`, before: { domain0, domain1: currentName }, after: { domain0, domain1: normalized } });
+      addChanges([{ action: "rename_domain1", label: `1级域 ${currentName} → ${normalized || "无"}`, before: { domain0, domain1: currentName }, after: { domain0, domain1: normalized, affectedTables: tables.filter((table) => table.domain0 === domain0 && table.domain1 === currentName).map((table) => table.tableName) } }]);
     }
     setRenameTarget(null);
     setCamera({ x: 0, y: 0, scale: 1 });
@@ -1576,7 +1669,12 @@ export default function Home() {
     downloadBlob(new Blob([buffer], { type: "application/zip" }), `schema-atlas-annotations-${new Date().toISOString().slice(0, 10)}.zip`);
     toast.success(`已导出 ${files.length} 个 JSON 文件`, { description: "包含 ontologies、rdb-mapping 及枚举目录。" });
   };
-  const exportAudit = () => downloadBlob(new Blob([JSON.stringify(changeRecords, null, 2)], { type: "application/json" }), `schema-atlas-change-log-${new Date().toISOString().slice(0, 10)}.json`);
+  const exportAudit = () => downloadBlob(new Blob([JSON.stringify(buildChangeHistoryExport(changeHistory), null, 2)], { type: "application/json" }), `schema-atlas-change-log-${new Date().toISOString().slice(0, 10)}.json`);
+  const exportTableAudit = (tableName: string) => {
+    const group = buildChangeHistoryExport(changeHistory).tables.find((item) => item.table.tableName === tableName);
+    if (!group) return toast.error("这张表还没有变更记录");
+    downloadBlob(new Blob([JSON.stringify({ schemaVersion: 2, ...group }, null, 2)], { type: "application/json" }), `${tableName}-change-log-${new Date().toISOString().slice(0, 10)}.json`);
+  };
 
   const deleteFieldColumn = fieldDeleteTarget
     ? tables.find((table) => table.tableName === fieldDeleteTarget.tableName)?.columns.find((column) => column.name === fieldDeleteTarget.fieldName)
@@ -1632,11 +1730,13 @@ export default function Home() {
       graph={graph}
       tables={tables}
       relationships={relationships}
+      changeHistory={changeHistory}
       onClose={() => setInspector(null)}
       onFocus={(tableName) => enterScope({ level: "focus", tableName })}
       onDelete={(tableName) => setDeleteTargets([tableName])}
       onEditField={(tableName, fieldName) => setFieldTarget({ tableName, fieldName })}
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
+      onExportChanges={exportTableAudit}
     />
     <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
     <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
@@ -1646,7 +1746,7 @@ export default function Home() {
     <FieldEditorDialog open={Boolean(fieldTarget && selectedFieldTable && selectedField)} table={selectedFieldTable} column={selectedField} onOpenChange={(open) => { if (!open) setFieldTarget(null); }} onSave={saveFieldAnnotation} onDelete={() => { if (fieldTarget) setFieldDeleteTarget(fieldTarget); setFieldTarget(null); }} />
     <TableConfigDialog open={Boolean(tableConfigTarget && selectedConfigTable)} table={selectedConfigTable} error={tableConfigError} onOpenChange={(open) => { if (!open) { setTableConfigTarget(null); setTableConfigError(""); } }} onSave={saveTableConfig} />
     <RenameDomainDialog open={Boolean(renameTarget)} level={renameTarget?.level ?? 0} currentName={renameTarget?.currentName ?? ""} onOpenChange={(open) => { if (!open) setRenameTarget(null); }} onSave={renameDomain} />
-    <AuditLogSheet open={auditOpen} records={changeRecords} onOpenChange={setAuditOpen} onDownload={exportAudit} />
+    <AuditLogSheet open={auditOpen} history={changeHistory} tables={tables} onOpenChange={setAuditOpen} onDownload={exportAudit} />
     <Toaster position="bottom-right" />
   </main>;
 }
