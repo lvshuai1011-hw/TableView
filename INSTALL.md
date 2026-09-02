@@ -52,6 +52,15 @@ server {
     listen 80;
     server_name schema.example.com;
 
+    location /claude-sidecar/ {
+        proxy_pass http://127.0.0.1:4318/;
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -87,8 +96,84 @@ server {
 ## 7. 常用命令
 
 ```bash
-npm run dev      # 开发模式
-npm run lint     # 代码检查
-npm run build    # 生产构建
-npm run start    # 启动生产服务
+npm run dev          # 开发模式
+npm run ai:sidecar   # 本机 Claude Code sidecar
+npm run lint         # 代码检查
+npm run build        # 生产构建
+npm run start        # 启动生产服务
 ```
+
+## 8. 本地 Claude Code 标注助手
+
+AI 标注功能不使用 Anthropic SDK，也不直接调用模型 API。Schema Atlas 通过同机 Node sidecar 启动系统已经安装和登录的 `claude` CLI。
+
+先确认 Claude Code 本机可用：
+
+```bash
+claude --version
+claude auth status
+```
+
+启动 sidecar：
+
+```bash
+cd /home/AI_BUILD/TableView
+npm run ai:sidecar
+```
+
+默认监听：
+
+```text
+127.0.0.1:4318
+```
+
+开发模式下 Vite 会把 `/claude-sidecar/*` 自动代理到这个端口。生产部署使用上面的 Nginx `/claude-sidecar/` location，避免把 sidecar 端口直接暴露到网络。
+
+sidecar 调用 Claude Code 时默认固定使用：
+
+```text
+--dangerously-skip-permissions
+```
+
+并根据前端设置把参考资料目录转换为多个：
+
+```text
+--add-dir /path/to/repo
+--add-dir /path/to/approved-json
+--add-dir /path/to/specs
+```
+
+因此参考资料目录建议在操作系统层面挂载为只读。Schema Atlas 自己的 AI 临时输入会写入：
+
+```text
+.schema-atlas-ai/jobs/
+```
+
+该目录已经加入 `.gitignore`。
+
+### Session 浏览与继续纠正
+
+Claude Code 本地 session transcript 直接读取自：
+
+```text
+~/.claude/projects/
+```
+
+前端的 `Sessions` 页签会列出这些本地 session，点击后可以查看用户消息、Claude 回复以及工具调用过程。选择“设为当前并继续”后，后续纠正通过 Claude Code 原生：
+
+```text
+--resume <session-id>
+```
+
+继续同一个会话，不另外维护一套对话数据库。
+
+### AI 标注流程
+
+1. 导入全部 PDM JSON。
+2. 在 AI 面板设置本地代码仓库、已审核 JSON、规范资料等参考目录。
+3. 点击“AI 生成全部标注”。
+4. Claude Code 主动读取这些目录并生成类和字段标注 Proposal。
+5. 无法可靠判断的业务概念进入“人工澄清 Todo”。
+6. 人工填写澄清答案后继续同一 Claude Code session。
+7. 对不正确的标注可以在右侧继续自然语言纠正。
+8. 人工确认 Proposal 后再写回 Schema Atlas 正式标注。
