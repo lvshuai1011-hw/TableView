@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CircleAlert,
   Clock3,
+  FileText,
   FileCheck2,
   FolderSearch,
   ListTodo,
@@ -41,6 +42,9 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
+import DEFAULT_ANNOTATION_PROMPT from "../config/default-annotation-prompt.txt?raw";
+import DEFAULT_BATCH_INSTRUCTION_TEXT from "../config/default-batch-instruction.txt?raw";
+import DEFAULT_TABLE_INSTRUCTION_TEXT from "../config/default-table-instruction.txt?raw";
 import { summarizeAiDraft } from "./ai-utils";
 import type {
   AiHealth,
@@ -52,6 +56,11 @@ import type {
 } from "./ai-types";
 
 const REFERENCES_KEY = "schema-atlas.ai.reference-paths.v1";
+const PROMPT_KEY = "schema-atlas.ai.prompt-template.v1";
+const BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
+const DEFAULT_BATCH_INSTRUCTION = DEFAULT_BATCH_INSTRUCTION_TEXT.trim();
+const DEFAULT_TABLE_INSTRUCTION = DEFAULT_TABLE_INSTRUCTION_TEXT.trim();
+const PROMPT_VARIABLES = ["table_name", "mode", "reference_paths", "clarifications", "user_message"];
 
 function statusLabel(status: string) {
   return ({
@@ -152,6 +161,7 @@ function TodoCard({ todo, busy, onAnswer }: { todo: AiTodo; busy: boolean; onAns
     <div className="ai-todo-head"><Badge variant="outline">{todo.scope === "field" ? todo.fieldName : todo.scope === "domain" ? "域级概念" : "表级概念"}</Badge>{todo.blocking && <span><CircleAlert size={12} />阻塞生成</span>}</div>
     <strong>{todo.question}</strong>
     {todo.reason && <p>{todo.reason}</p>}
+    {Boolean(todo.checkedSources?.length) && <div className="ai-todo-sources"><FolderSearch size={12} /><span>已检索</span>{todo.checkedSources?.map((source) => <code key={source}>{source}</code>)}</div>}
     {todo.suggestions.length > 0 && <div className="ai-todo-suggestions">{todo.suggestions.map((suggestion) => <button key={suggestion} type="button" onClick={() => setAnswer(suggestion)}>{suggestion}</button>)}</div>}
     {todo.status === "answered" ? <div className="ai-todo-answer"><CheckCircle2 size={13} /><span>{todo.answer}</span></div> : <div className="ai-todo-compose"><Input value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="填写业务确认结果" /><Button size="sm" disabled={!answer.trim() || busy} onClick={() => onAnswer(todo, answer.trim())}>{busy ? <Loader2 size={13} className="spin" /> : <Send size={13} />}提交</Button></div>}
   </article>;
@@ -175,13 +185,16 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<AiSession | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
-  const [chatMessage, setChatMessage] = useState("");
+  const [chatMessage, setChatMessage] = useState(DEFAULT_TABLE_INSTRUCTION);
   const [chatBusy, setChatBusy] = useState(false);
   const [activity, setActivity] = useState("");
   const [batchDomain, setBatchDomain] = useState("__all__");
   const [batchBusy, setBatchBusy] = useState(false);
   const [answeringTodo, setAnsweringTodo] = useState<string | null>(null);
   const [referenceText, setReferenceText] = useState("");
+  const [promptTemplate, setPromptTemplate] = useState(DEFAULT_ANNOTATION_PROMPT.trim());
+  const [batchInstruction, setBatchInstruction] = useState(DEFAULT_BATCH_INSTRUCTION);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const activeTable = initialTableName ? tables.find((table) => table.tableName === initialTableName) : undefined;
   const domains = useMemo(() => [...new Set(tables.map((table) => table.domain0))].sort((a, b) => a.localeCompare(b, "zh-CN")), [tables]);
   const referencePaths = useMemo(() => referenceText.split("\n").map((item) => item.trim()).filter(Boolean), [referenceText]);
@@ -224,14 +237,24 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
-      try { setReferenceText(window.localStorage.getItem(REFERENCES_KEY) ?? ""); } catch { /* preferences are optional */ }
+      try {
+        setReferenceText(window.localStorage.getItem(REFERENCES_KEY) ?? "");
+        setPromptTemplate(window.localStorage.getItem(PROMPT_KEY) || DEFAULT_ANNOTATION_PROMPT.trim());
+        setBatchInstruction(window.localStorage.getItem(BATCH_INSTRUCTION_KEY) || DEFAULT_BATCH_INSTRUCTION);
+      } catch { /* preferences are optional */ }
+      setPreferencesReady(true);
     });
     return () => { active = false; };
   }, []);
 
   useEffect(() => {
-    try { window.localStorage.setItem(REFERENCES_KEY, referenceText); } catch { /* preferences are optional */ }
-  }, [referenceText]);
+    if (!preferencesReady) return;
+    try {
+      window.localStorage.setItem(REFERENCES_KEY, referenceText);
+      window.localStorage.setItem(PROMPT_KEY, promptTemplate);
+      window.localStorage.setItem(BATCH_INSTRUCTION_KEY, batchInstruction);
+    } catch { /* preferences are optional */ }
+  }, [batchInstruction, preferencesReady, promptTemplate, referenceText]);
 
   useEffect(() => {
     if (!open) return;
@@ -241,6 +264,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
       setTab("work");
       setSelectedSessionId(null);
       setSelectedSession(null);
+      setChatMessage(initialTableName ? DEFAULT_TABLE_INSTRUCTION : "");
       void refresh();
     });
     return () => { active = false; };
@@ -283,7 +307,8 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
 
   const sendMessage = async () => {
     if (!activeTable || chatBusy) return;
-    const text = chatMessage.trim() || (selectedSession ? "请重新检查当前草稿，补充仍然缺少的标注。" : "请生成当前表的第一版完整标注。");
+    const text = chatMessage.trim();
+    if (!text) return;
     setChatMessage("");
     setChatBusy(true);
     setActivity("正在启动 Claude Code…");
@@ -292,6 +317,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
         table: activeTable,
         message: text,
         referencePaths,
+        promptTemplate,
         sessionId: selectedSession?.tableName === activeTable.tableName ? selectedSession.id : undefined,
       }, (event) => {
         if (event.label) setActivity(event.label);
@@ -320,6 +346,8 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
         body: JSON.stringify({
           tables: selectedTables,
           referencePaths,
+          promptTemplate,
+          batchInstruction,
           scope: batchDomain === "__all__" ? { level: "global" } : { level: "domain", domain0: batchDomain },
         }),
       });
@@ -347,7 +375,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
       const currentTable = tables.find((table) => table.tableName === todo.tableName);
       await api(`/api/ai/todos/${todo.id}/answer`, {
         method: "POST",
-        body: JSON.stringify({ answer, table: currentTable }),
+        body: JSON.stringify({ answer, table: currentTable, promptTemplate }),
       });
       toast.success("澄清已提交", { description: "Claude Code 正在恢复原会话并修订草稿。" });
       setSelectedSessionId(todo.sessionId);
@@ -380,6 +408,10 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
   const draftSummary = activeTable && selectedSession?.draft && selectedSession.draft.tableName === activeTable.tableName
     ? summarizeAiDraft(activeTable, selectedSession.draft)
     : null;
+  const unknownPromptVariables = [...promptTemplate.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)]
+    .map((match) => match[1])
+    .filter((key, index, items) => !PROMPT_VARIABLES.includes(key) && items.indexOf(key) === index);
+  const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
   const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open") ?? [];
   const openTodos = todos.filter((todo) => todo.status === "open");
 
@@ -398,6 +430,7 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
           <TabsTrigger value="work"><WandSparkles size={14} />{activeTable ? "审核对话" : "批量生成"}</TabsTrigger>
           <TabsTrigger value="sessions"><MessageSquareText size={14} />Sessions <span>{sessions.length}</span></TabsTrigger>
           <TabsTrigger value="todos"><ListTodo size={14} />待澄清 <span>{openTodos.length}</span></TabsTrigger>
+          <TabsTrigger value="prompt"><FileText size={14} />提示词</TabsTrigger>
           <TabsTrigger value="settings"><FolderSearch size={14} />资料</TabsTrigger>
         </TabsList>
 
@@ -423,9 +456,9 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
               </section>}
               {currentTodos.length > 0 && <section className="ai-table-todos"><h3>需要人工确认 <span>{currentTodos.length}</span></h3>{currentTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}</section>}
             </> : <EmptyState icon={Bot} title="为当前表建立 AI 会话" detail="Claude Code 会读取表结构、上下游关系和你配置的本地参考资料，先生成一版供人工审核。" />}
-            <div className="ai-chat-composer"><Textarea value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} placeholder={selectedSession ? "指出不准确的字段、补充业务规则，或要求重新检查…" : "可补充本表的生成要求；留空则直接生成第一版"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void sendMessage(); }} /><div><span>Ctrl/⌘ + Enter 发送</span><Button onClick={sendMessage} disabled={chatBusy || !health?.ready}>{chatBusy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{selectedSession ? "发送并修订" : "生成当前表"}</Button></div></div>
+            <div className="ai-chat-composer"><Textarea value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} placeholder={selectedSession ? "指出不准确的字段、补充业务规则，或要求重新检查…" : "填写本表的生成要求"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void sendMessage(); }} /><div><span>本轮内容写入 <code>{"{{user_message}}"}</code></span><Button onClick={sendMessage} disabled={chatBusy || !health?.ready || !chatMessage.trim() || !promptValid}>{chatBusy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{selectedSession ? "发送并修订" : "生成当前表"}</Button></div></div>
           </div> : <div className="ai-batch-workspace">
-            <section className="ai-batch-card"><div className="ai-section-heading"><div><WandSparkles size={18} /><span>生成所有 JSON 的标注草稿</span></div><Badge variant="outline">逐表 Session</Badge></div><p>每张表建立独立会话，批量任务只负责统一调度。草稿不会覆盖当前标注。</p><label><span>生成范围</span><Select value={batchDomain} onValueChange={setBatchDomain}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__all__">全部 0级域 · {tables.length} 张表</SelectItem>{domains.map((domain) => <SelectItem key={domain} value={domain}>{domain} · {tables.filter((table) => table.domain0 === domain).length} 张表</SelectItem>)}</SelectContent></Select></label><Button onClick={startBatch} disabled={!health?.ready || batchBusy || tables.length === 0}>{batchBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}启动全量生成</Button></section>
+            <section className="ai-batch-card"><div className="ai-section-heading"><div><WandSparkles size={18} /><span>生成所有 JSON 的标注草稿</span></div><Badge variant="outline">逐表 Session</Badge></div><p>每张表建立独立会话，批量任务只负责统一调度。草稿不会覆盖当前标注。</p><label><span>生成范围</span><Select value={batchDomain} onValueChange={setBatchDomain}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__all__">全部 0级域 · {tables.length} 张表</SelectItem>{domains.map((domain) => <SelectItem key={domain} value={domain}>{domain} · {tables.filter((table) => table.domain0 === domain).length} 张表</SelectItem>)}</SelectContent></Select></label><label><span>批量任务要求</span><Textarea value={batchInstruction} onChange={(event) => setBatchInstruction(event.target.value)} rows={3} /></label><Button onClick={startBatch} disabled={!health?.ready || batchBusy || tables.length === 0 || !batchInstruction.trim() || !promptValid}>{batchBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}启动全量生成</Button></section>
             {currentJob && <section className="ai-job-card"><div><div><span className={`ai-session-dot ${statusClass(currentJob.status)}`} /><strong>{currentJob.label}</strong></div><Badge variant="outline" className={statusClass(currentJob.status)}>{statusLabel(currentJob.status)}</Badge></div><Progress value={currentJob.total ? ((currentJob.completed + currentJob.failed) / currentJob.total) * 100 : 0} /><div className="ai-job-stats"><span>{currentJob.completed} 已完成</span><span>{currentJob.failed} 失败</span><span>{currentJob.total - currentJob.completed - currentJob.failed} 待处理</span>{["queued", "running"].includes(currentJob.status) && <button onClick={() => stopJob(currentJob)}><Square size={11} />停止</button>}</div></section>}
             <div className="ai-batch-note"><Clock3 size={15} /><p>生成在服务器后台继续运行。关闭浏览器或 SSH 不会中断由 systemd 托管的任务。</p></div>
           </div>}
@@ -433,13 +466,24 @@ export function AiPanel({ open, onOpenChange, tables, initialTableName, onReview
 
         <TabsContent value="sessions" className="ai-tab-content ai-sessions-content">
           <div className="ai-session-list"><div className="ai-list-heading"><div><strong>Schema Atlas Sessions</strong><span>只展示本系统登记的会话</span></div><Button variant="outline" size="sm" onClick={() => refresh()}><RefreshCw size={13} />刷新</Button></div>{sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} onClick={() => selectSession(session.id)} />)}{sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}</div>
-          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span></div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} />{selectedSession.activities.length > 0 && <details className="ai-activities"><summary>执行过程 · {selectedSession.activities.length}</summary>{selectedSession.activities.map((item) => <div key={item.id}><time>{shortTime(item.at)}</time><span>{item.label}</span></div>)}</details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整的人工与 Claude Code 对话过程。" />}</div>
+          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span></div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}{selectedSession.activities.length > 0 && <details className="ai-activities"><summary>执行过程 · {selectedSession.activities.length}</summary>{selectedSession.activities.map((item) => <div key={item.id}><time>{shortTime(item.at)}</time><span>{item.label}</span></div>)}</details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整的人工与 Claude Code 对话过程。" />}</div>
         </TabsContent>
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">
           <div className="ai-list-heading"><div><strong>人工澄清队列</strong><span>答案会回到原表 Session，并触发草稿修订</span></div><Badge variant="outline">{openTodos.length} 待处理</Badge></div>
           {openTodos.map((todo) => <div key={todo.id} className="ai-todo-with-table"><div><button type="button" onClick={() => { setSelectedSessionId(todo.sessionId); setTab("sessions"); }}><code>{todo.tableName}</code><span>查看会话</span></button><button type="button" onClick={() => { onReviewTable(todo.tableName); setTab("work"); }}>进入表审核</button></div><TodoCard todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} /></div>)}
-          {openTodos.length === 0 && <EmptyState icon={CheckCircle2} title="没有待澄清项" detail="Claude Code 不确定的业务概念会集中到这里，由人工逐项确认。" />}
+          {openTodos.length === 0 && <EmptyState icon={CheckCircle2} title="没有待澄清项" detail="检索资料后仍无明确依据或存在冲突的业务概念，才会进入这里。" />}
+        </TabsContent>
+
+        <TabsContent value="prompt" className="ai-tab-content ai-prompt-settings">
+          <section>
+            <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">自动保存</Badge></div>
+            <p>这里的内容会原样作为基础模板发送给 Claude Code。单表要求、批量要求和人工澄清会替换对应占位符。</p>
+            <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
+            <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
+            {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}
+            <div className="ai-prompt-footer"><span>{promptTemplate.length.toLocaleString("zh-CN")} 字符 · 修改后用于下一轮任务</span><Button variant="outline" size="sm" onClick={() => setPromptTemplate(DEFAULT_ANNOTATION_PROMPT.trim())}><RefreshCw size={13} />恢复默认</Button></div>
+          </section>
         </TabsContent>
 
         <TabsContent value="settings" className="ai-tab-content ai-reference-settings">

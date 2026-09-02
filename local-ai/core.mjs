@@ -168,12 +168,13 @@ export const annotationOutputSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["scope", "fieldName", "question", "reason", "suggestions", "blocking"],
+        required: ["scope", "fieldName", "question", "reason", "checkedSources", "suggestions", "blocking"],
         properties: {
           scope: { type: "string", enum: ["table", "field", "domain"] },
           fieldName: { type: "string" },
           question: { type: "string" },
           reason: { type: "string" },
+          checkedSources: { type: "array", minItems: 1, items: { type: "string" } },
           suggestions: { type: "array", items: { type: "string" } },
           blocking: { type: "boolean" },
         },
@@ -210,6 +211,8 @@ function normalizeColumnDraft(value, column) {
 
 function normalizeTodo(value, tableName, sessionId) {
   if (!value || typeof value !== "object" || !stringValue(value.question)) return undefined;
+  const checkedSources = stringArray(value.checkedSources);
+  if (checkedSources.length === 0) return undefined;
   const scope = ["table", "field", "domain"].includes(value.scope) ? value.scope : "table";
   return {
     id: randomUUID(),
@@ -219,6 +222,7 @@ function normalizeTodo(value, tableName, sessionId) {
     fieldName: scope === "field" ? stringValue(value.fieldName) : "",
     question: stringValue(value.question),
     reason: stringValue(value.reason),
+    checkedSources,
     suggestions: stringArray(value.suggestions),
     blocking: boolValue(value.blocking),
     status: "open",
@@ -249,6 +253,7 @@ export function normalizeStructuredOutput(value, table, sessionId) {
       fieldName: column.name,
       question: `属性名 ${column.entityColumn} 同时用于 ${previous} 和 ${column.name}，应该如何区分？`,
       reason: "同一个类内的 attr_name 必须唯一。",
+      checkedSources: ["当前 AI 草稿（属性名唯一性校验）"],
       suggestions: [],
       blocking: true,
     }, table.tableName, sessionId));
@@ -272,35 +277,41 @@ export function normalizeStructuredOutput(value, table, sessionId) {
   };
 }
 
-export function buildAnnotationPrompt({ table, mode, userMessage, referencePaths, clarifications }) {
+export const PROMPT_TEMPLATE_KEYS = [
+  "table_name",
+  "mode",
+  "reference_paths",
+  "clarifications",
+  "user_message",
+];
+
+export function normalizePromptTemplate(value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("提示词模板不能为空");
+  if (value.length > 100_000) throw new Error("提示词模板不能超过 100000 个字符");
+  const unknown = [...value.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)]
+    .map((match) => match[1])
+    .filter((key) => !PROMPT_TEMPLATE_KEYS.includes(key));
+  if (unknown.length) throw new Error(`提示词包含不支持的占位符：${[...new Set(unknown)].join("、")}`);
+  return value.trim();
+}
+
+export function buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, referencePaths, clarifications }) {
+  const template = normalizePromptTemplate(promptTemplate);
   const references = referencePaths.length
     ? referencePaths.map((entry) => `- ${entry.resolvedPath}`).join("\n")
-    : "- 没有额外参考目录，只使用当前工作目录中的输入文件。";
+    : "- 未配置额外参考资料";
   const clarificationText = clarifications.length
     ? clarifications.map((item) => `- ${item.question}\n  人工回答：${item.answer}`).join("\n")
     : "- 暂无人工澄清。";
-  return `你正在为 Schema Atlas 标注数据库表 ${table.tableName}。这是${mode === "generate" ? "首次生成" : "人工审核后的纠正"}任务。
-
-请先完整读取当前目录中的 input-table.json；如果 current-draft.json 存在，也要读取它。随后直接阅读下面列出的本地参考资料，必要时使用搜索工具理解代码、SQL、配置和已经标注好的 JSON。这是本地文件分析，不要建立向量库，也不要把参考资料当成可修改文件。
-
-参考资料：
-${references}
-
-已有人工澄清：
-${clarificationText}
-
-本轮人工要求：
-${userMessage}
-
-生成规则：
-1. 只能标注 input-table.json 中已经存在的表和字段，不能凭空增加数据库列。
-2. 原始导入 JSON 和参考资料都是只读依据，不要修改它们。
-3. className 使用清晰的英文 PascalCase；entityColumn 使用英文 camelCase，并保持一表一类、类内属性名唯一。
-4. detailedDescription、别名、枚举和布尔标志必须依据业务证据；isLocalId 只用于本类局部身份键，isCode 只用于编码语义字段。
-5. 无法确定的业务概念不要假装确定：先给出保守草稿，同时在 todos 中提出一个可由业务人员回答的具体问题，说明原因并尽量给出候选答案。
-6. included 表示该数据库字段是否进入本体和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，你不需要改变数据库类型。
-7. 对枚举字段填写 enumRef、enumDescription 和 enumValues；没有证据时不要编造枚举值。
-8. reply 用简洁中文总结本轮结论和仍需人工关注的内容。最终结果必须严格符合指定 JSON Schema。`;
+  const replacements = {
+    table_name: table.tableName,
+    mode: mode === "generate" ? "首次生成" : "人工审核后的纠正",
+    reference_paths: references,
+    clarifications: clarificationText,
+    user_message: typeof userMessage === "string" ? userMessage : "",
+  };
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (placeholder, key) =>
+    Object.prototype.hasOwnProperty.call(replacements, key) ? replacements[key] : placeholder);
 }
 
 export function parseStructuredResult(events) {
@@ -460,7 +471,7 @@ export class AtlasStore {
     });
   }
 
-  async createSession({ table, jobId = null, referencePaths = [] }) {
+  async createSession({ table, jobId = null, referencePaths = [], promptTemplate = "" }) {
     const id = randomUUID();
     const now = new Date().toISOString();
     const session = {
@@ -479,6 +490,7 @@ export class AtlasStore {
       todos: [],
       draft: null,
       referencePaths,
+      promptTemplate,
       turnCount: 0,
       error: null,
     };
@@ -521,7 +533,7 @@ export class AtlasStore {
     });
   }
 
-  async createJob({ label, scope, tables, referencePaths }) {
+  async createJob({ label, scope, tables, referencePaths, promptTemplate, batchInstruction }) {
     const id = randomUUID();
     const now = new Date().toISOString();
     const job = {
@@ -537,6 +549,8 @@ export class AtlasStore {
       tableNames: tables.map((table) => table.tableName),
       sessionIds: [],
       referencePaths,
+      promptTemplate,
+      batchInstruction,
       cancelled: false,
       error: null,
     };

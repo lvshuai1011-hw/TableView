@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,11 +8,16 @@ import { fileURLToPath } from "node:url";
 import {
   AtlasStore,
   buildAnnotationPrompt,
+  normalizePromptTemplate,
   normalizeStructuredOutput,
   validateReferencePaths,
 } from "../local-ai/core.mjs";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+const defaultPromptTemplate = await readFile(
+  path.join(projectRoot, "config", "default-annotation-prompt.txt"),
+  "utf8",
+);
 
 const table = {
   tableName: "PE_FREE_UNIT",
@@ -56,6 +61,7 @@ test("normalizes Claude output against imported columns and creates a duplicate-
 
 test("builds a direct-file prompt with human clarifications", () => {
   const prompt = buildAnnotationPrompt({
+    promptTemplate: defaultPromptTemplate,
     table,
     mode: "correct",
     userMessage: "FREE_UNIT_ID 是本地标识",
@@ -66,6 +72,35 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /\/srv\/reference\/repo/);
   assert.match(prompt, /人工回答：是/);
   assert.match(prompt, /不能凭空增加数据库列/);
+  assert.match(prompt, /只有检索后仍没有明确依据/);
+  assert.match(prompt, /checkedSources/);
+});
+
+test("renders an editable prompt template and rejects unknown placeholders", () => {
+  const prompt = buildAnnotationPrompt({
+    promptTemplate: "表={{table_name}}\n要求={{user_message}}\n资料={{reference_paths}}",
+    table,
+    mode: "generate",
+    userMessage: "生成一版",
+    referencePaths: [],
+    clarifications: [],
+  });
+  assert.match(prompt, /表=PE_FREE_UNIT/);
+  assert.match(prompt, /要求=生成一版/);
+  assert.throws(() => normalizePromptTemplate("{{unsupported}}"), /不支持的占位符/);
+});
+
+test("keeps clarification todos only when searched sources are recorded", () => {
+  const result = normalizeStructuredOutput({
+    draft: { columns: [] },
+    todos: [
+      { scope: "field", fieldName: "FREE_UNIT_TYPE_ID", question: "它表示什么？", reason: "置信度低", checkedSources: [], suggestions: [], blocking: false },
+      { scope: "field", fieldName: "FREE_UNIT_TYPE_ID", question: "两份资料定义冲突，以哪份为准？", reason: "定义冲突", checkedSources: ["/srv/reference/a.json", "/srv/reference/b.sql"], suggestions: [], blocking: true },
+    ],
+  }, table, "11111111-1111-4111-8111-111111111112");
+
+  assert.equal(result.todos.length, 1);
+  assert.deepEqual(result.todos[0].checkedSources, ["/srv/reference/a.json", "/srv/reference/b.sql"]);
 });
 
 test("keeps a durable index containing only Schema Atlas-created sessions", async () => {
@@ -146,7 +181,12 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     const response = await fetch(`${origin}/api/ai/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ table, message: "生成第一版", referencePaths: [] }),
+      body: JSON.stringify({
+        table,
+        message: "生成第一版",
+        referencePaths: [],
+        promptTemplate: defaultPromptTemplate,
+      }),
     });
     assert.equal(response.status, 200);
     const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));

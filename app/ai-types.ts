@@ -35,6 +35,7 @@ export type AiTodo = {
   fieldName: string;
   question: string;
   reason: string;
+  checkedSources?: string[];
   suggestions: string[];
   blocking: boolean;
   status: "open" | "answered";
@@ -68,6 +69,7 @@ export type AiSession = Omit<AiSessionSummary, "messageCount" | "todoCount" | "h
   todos: AiTodo[];
   draft: AiTableDraft | null;
   referencePaths: { requestedPath: string; resolvedPath: string; kind: "file" | "directory"; addDir: string }[];
+  promptTemplate?: string;
   turnCount: number;
 };
 

@@ -10,6 +10,7 @@ import {
   AtlasStore,
   buildAnnotationPrompt,
   describeStreamEvent,
+  normalizePromptTemplate,
   normalizeStructuredOutput,
   parseStructuredResult,
   resolveAllowedRoots,
@@ -17,6 +18,7 @@ import {
 } from "./core.mjs";
 
 const projectRoot = path.resolve(process.env.SCHEMA_ATLAS_PROJECT_ROOT || process.cwd());
+const defaultPromptPath = path.join(projectRoot, "config", "default-annotation-prompt.txt");
 const storeRoot = path.resolve(process.env.SCHEMA_ATLAS_AI_DATA_DIR || path.join(projectRoot, ".schema-atlas-ai"));
 const claudeBin = process.env.CLAUDE_BIN || "claude";
 const host = process.env.SCHEMA_ATLAS_AI_HOST || "127.0.0.1";
@@ -26,6 +28,7 @@ const runningSessions = new Map();
 const runningJobs = new Set();
 let allowedRoots = [];
 let healthCache = null;
+let defaultPromptTemplate = "";
 
 function now() { return new Date().toISOString(); }
 
@@ -59,6 +62,14 @@ async function readJsonBody(request, limit = 64 * 1024 * 1024) {
 
 function validTable(value) {
   return value && typeof value === "object" && typeof value.tableName === "string" && Array.isArray(value.columns);
+}
+
+function requestPromptTemplate(value, fallback = defaultPromptTemplate) {
+  try {
+    return normalizePromptTemplate(typeof value === "string" ? value : fallback);
+  } catch (error) {
+    throw Object.assign(error, { statusCode: 400 });
+  }
 }
 
 function message(role, content, extra = {}) {
@@ -109,7 +120,7 @@ function claudeArguments(session, prompt, referencePaths) {
   return args;
 }
 
-async function runClaudeTurn({ session, table, userMessage, mode, referencePaths, onEvent = () => {} }) {
+async function runClaudeTurn({ session, table, userMessage, mode, referencePaths, promptTemplate, onEvent = () => {} }) {
   if (runningSessions.has(session.id)) throw Object.assign(new Error("该会话正在运行，请等待本轮完成"), { statusCode: 409 });
   const workspace = store.workspacePath(session.id);
   await writeFile(path.join(workspace, "input-table.json"), `${JSON.stringify(table, null, 2)}\n`, "utf8");
@@ -117,11 +128,12 @@ async function runClaudeTurn({ session, table, userMessage, mode, referencePaths
   const clarifications = session.todos.filter((todo) => todo.status === "answered" && todo.answer);
   await writeFile(path.join(workspace, "reference-paths.json"), `${JSON.stringify(referencePaths, null, 2)}\n`, "utf8");
   await writeFile(path.join(workspace, "clarifications.json"), `${JSON.stringify(clarifications, null, 2)}\n`, "utf8");
-  const prompt = buildAnnotationPrompt({ table, mode, userMessage, referencePaths, clarifications });
+  const prompt = buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, referencePaths, clarifications });
 
   session.status = "running";
   session.error = null;
   session.referencePaths = referencePaths;
+  session.promptTemplate = promptTemplate;
   session.messages.push(message("user", userMessage));
   compactActivity(session, "准备本轮上下文");
   await store.saveSession(session);
@@ -280,15 +292,16 @@ async function runBatch(job, tables, references) {
       }
       let session;
       try {
-        session = await store.createSession({ table, jobId: job.id, referencePaths: references });
+        session = await store.createSession({ table, jobId: job.id, referencePaths: references, promptTemplate: job.promptTemplate });
         job.sessionIds.push(session.id);
         await store.saveJob(job);
         await runClaudeTurn({
           session,
           table,
           mode: "generate",
-          userMessage: "请基于导入表、上下游关系及本地参考资料生成完整的第一版标注。",
+          userMessage: job.batchInstruction,
           referencePaths: references,
+          promptTemplate: job.promptTemplate,
         });
         job.completed += 1;
       } catch {
@@ -315,10 +328,10 @@ async function handleChat(request, response) {
   let session = body.sessionId ? await store.readSession(body.sessionId) : null;
   if (body.sessionId && !session) throw Object.assign(new Error("会话不存在"), { statusCode: 404 });
   if (session && session.tableName !== body.table.tableName) throw Object.assign(new Error("会话与当前表不匹配"), { statusCode: 409 });
-  if (!session) session = await store.createSession({ table: body.table, referencePaths: validation.resolved });
-  const userMessage = typeof body.message === "string" && body.message.trim()
-    ? body.message.trim()
-    : "请生成当前表的完整标注草稿。";
+  const promptTemplate = requestPromptTemplate(body.promptTemplate, session?.promptTemplate || defaultPromptTemplate);
+  if (!session) session = await store.createSession({ table: body.table, referencePaths: validation.resolved, promptTemplate });
+  const userMessage = typeof body.message === "string" ? body.message.trim() : "";
+  if (!userMessage) throw Object.assign(new Error("请填写本轮生成或修订要求"), { statusCode: 400 });
 
   response.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
@@ -336,6 +349,7 @@ async function handleChat(request, response) {
       mode: session.turnCount > 0 ? "correct" : "generate",
       userMessage,
       referencePaths: validation.resolved,
+      promptTemplate,
       onEvent: send,
     });
   } catch {
@@ -351,8 +365,11 @@ async function handleGenerate(request, response) {
   const validation = await validateReferencePaths(body.referencePaths, allowedRoots);
   if (validation.errors.length) throw Object.assign(new Error(validation.errors.join("；")), { statusCode: 400 });
   const scope = body.scope && typeof body.scope === "object" ? body.scope : { level: "global" };
+  const promptTemplate = requestPromptTemplate(body.promptTemplate);
+  const batchInstruction = typeof body.batchInstruction === "string" ? body.batchInstruction.trim() : "";
+  if (!batchInstruction) throw Object.assign(new Error("请填写批量生成要求"), { statusCode: 400 });
   const label = scope.level === "domain" && scope.domain0 ? `${scope.domain0} · AI 全量标注` : `全部域 · AI 全量标注`;
-  const job = await store.createJob({ label, scope, tables, referencePaths: validation.resolved });
+  const job = await store.createJob({ label, scope, tables, referencePaths: validation.resolved, promptTemplate, batchInstruction });
   setImmediate(() => runBatch(job, tables, validation.resolved));
   jsonResponse(response, 202, { job });
 }
@@ -381,14 +398,16 @@ async function handleTodoAnswer(request, response, todoId) {
   const table = validTable(body.table)
     ? body.table
     : JSON.parse(await readFile(path.join(store.workspacePath(session.id), "input-table.json"), "utf8"));
+  const promptTemplate = requestPromptTemplate(body.promptTemplate, session.promptTemplate || defaultPromptTemplate);
   setImmediate(async () => {
     try {
       await runClaudeTurn({
         session,
         table,
         mode: "correct",
-        userMessage: `人工已经回答待澄清问题“${todo.question}”：${answer}。请据此修订草稿，并检查这一答案是否影响其他字段。`,
+        userMessage: answer,
         referencePaths: session.referencePaths ?? [],
+        promptTemplate,
       });
     } catch { /* failure is visible in the session */ }
   });
@@ -405,6 +424,10 @@ async function handleRequest(request, response) {
   if (url.pathname === "/api/ai/health") {
     if (request.method !== "GET") return methodNotAllowed(response);
     return jsonResponse(response, 200, await checkClaude());
+  }
+  if (url.pathname === "/api/ai/prompt-default") {
+    if (request.method !== "GET") return methodNotAllowed(response);
+    return jsonResponse(response, 200, { promptTemplate: defaultPromptTemplate });
   }
   if (url.pathname === "/api/ai/sessions") {
     if (request.method !== "GET") return methodNotAllowed(response);
@@ -473,6 +496,7 @@ export async function startServer() {
   if (typeof process.getuid === "function" && process.getuid() === 0 && process.env.SCHEMA_ATLAS_ALLOW_ROOT !== "1") {
     throw new Error("Schema Atlas AI 服务拒绝以 root 运行。请切换到 claude 用户后启动。 ");
   }
+  defaultPromptTemplate = normalizePromptTemplate(await readFile(defaultPromptPath, "utf8"));
   await store.init();
   await recoverInterruptedWork();
   allowedRoots = await resolveAllowedRoots(projectRoot);

@@ -18,7 +18,8 @@ Schema Atlas 用于批量导入 PDM JSON 表定义，并从全局业务域逐层
 - 表/字段删除、外键映射同步清理和可导出的变更记录
 - 按约定目录导出 Ontology、RDB Mapping 和枚举 JSON 的 ZIP
 - 本地 Claude Code CLI 批量生成全表标注草稿，不使用 SDK 或 RAG
-- 表级 AI 审核对话、人工澄清 TODO 和可恢复的 Session 中心
+- 表级 AI 审核对话、证据检索后的人工澄清 TODO 和可恢复的 Session 中心
+- 前端可见、可编辑、可恢复默认的 Claude Code 完整提示词模板
 - 导入表与人工标注保存在浏览器；AI Session、草稿和完整对话保存在服务器
 
 ## 快速部署
@@ -64,13 +65,19 @@ exit
 
 ## Claude Code 标注流程
 
-1. 顶部点击“AI 标注”，选择全部域或一个 0级域，配置本地代码仓库、历史标注 JSON 等参考路径。
+1. 顶部点击“AI 标注”，在“资料”中配置本地代码仓库、历史标注 JSON 等参考路径，在“提示词”中审核或修改完整模板。
 2. 系统为每张表创建独立 Claude Code Session，使用 `--dangerously-skip-permissions` 执行，并把结果保存在草稿层。
-3. Claude Code 无法确定的概念进入人工 TODO；填写答案后，系统恢复原 Session 继续修订。
+3. Claude Code 必须先检索当前表、已有草稿和配置的参考资料；检索后仍无明确依据或发现冲突的概念才进入人工 TODO，并显示“已检索”来源。低置信度本身不会直接产生 TODO。
 4. 在表详情点击“AI 审核此表”，查看完整对话、低置信字段和草稿摘要，也可以继续对话纠正。
 5. 人工确认并应用后，正式标注才会变化，同时写入该表自己的变更记录。
 
 Session 由 Schema Atlas 生成 UUID 并登记，前端不会混入用户在其他目录手工创建的 Claude Code 会话。服务器只把允许根目录中的路径传给 `--add-dir`，Claude Code直接读取文件，不建立向量索引。
+
+### 提示词配置
+
+默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。页面“AI 标注 → 提示词”会完整显示模板，可直接编辑并自动保存在当前浏览器，也可一键恢复默认。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。
+
+可用占位符：`{{table_name}}`、`{{mode}}`、`{{reference_paths}}`、`{{clarifications}}`、`{{user_message}}`。页面会阻止包含未知占位符的任务；批量任务要求和单表对话内容通过 `{{user_message}}` 注入，不需要修改基础模板。
 
 ## 关系方向
 

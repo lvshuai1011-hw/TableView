@@ -114,6 +114,12 @@ sudo systemctl restart schema-atlas
 sudo setfacl -R -m u:claude:rX /data/domain-docs
 ```
 
+### 配置生成提示词
+
+安装后在页面打开“AI 标注 → 提示词”，可查看和修改发送给 Claude Code 的完整模板。修改自动保存在当前浏览器，下一轮单表、批量或 TODO 续写任务立即使用；“恢复默认”会重新载入仓库中的 `config/default-annotation-prompt.txt`。
+
+默认模板要求 Claude Code 先检查当前表、现有草稿和配置的参考资料。只有检索后仍没有明确依据或资料互相冲突时，才会创建待澄清项，并在界面列出已检索来源。
+
 ## 5. 不安装 systemd 的临时运行方式
 
 用 `claude` 用户执行：
