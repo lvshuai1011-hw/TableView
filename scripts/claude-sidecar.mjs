@@ -150,10 +150,18 @@ function runProcess(command, args, { cwd = DEFAULT_PROJECT_ROOT, timeoutMs = 0 }
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let timer = null;
+    let settled = false;
+
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      rejectPromise(error);
+    };
 
     const abortForSize = () => {
       child.kill("SIGTERM");
-      rejectPromise(new Error("Claude Code 输出超过 sidecar 限制"));
+      finishReject(new Error("Claude Code 输出超过 sidecar 限制"));
     };
 
     child.stdout.on("data", (chunk) => {
@@ -166,8 +174,10 @@ function runProcess(command, args, { cwd = DEFAULT_PROJECT_ROOT, timeoutMs = 0 }
       if (stderrBytes > MAX_STDIO_BYTES) return abortForSize();
       stderr.push(chunk);
     });
-    child.on("error", rejectPromise);
+    child.on("error", finishReject);
     child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
       resolvePromise({
         code,
@@ -180,7 +190,7 @@ function runProcess(command, args, { cwd = DEFAULT_PROJECT_ROOT, timeoutMs = 0 }
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         child.kill("SIGTERM");
-        rejectPromise(new Error(`Claude Code 超过 ${Math.round(timeoutMs / 1000)} 秒未完成`));
+        finishReject(new Error(`Claude Code 超过 ${Math.round(timeoutMs / 1000)} 秒未完成`));
       }, timeoutMs);
       timer.unref?.();
     }
@@ -201,6 +211,7 @@ async function claudeHealth() {
     projectRoot: DEFAULT_PROJECT_ROOT,
     sessionRoot: SESSION_ROOT,
     permissionMode: "--dangerously-skip-permissions",
+    runningAsRoot: typeof process.getuid === "function" ? process.getuid() === 0 : false,
   };
 }
 
@@ -230,8 +241,7 @@ function recordToMessages(record, index) {
   const message = record.message && typeof record.message === "object" ? record.message : null;
   const role = message?.role === "assistant" ? "assistant" : message?.role === "user" ? "user" : null;
   if (!role) return [];
-  const content = Array.isArray(message.content) ? message.content : message.content;
-  const blocks = Array.isArray(content) ? content : [content];
+  const blocks = Array.isArray(message.content) ? message.content : [message.content];
   const result = [];
   let ordinal = 0;
   for (const block of blocks) {
@@ -356,10 +366,12 @@ function buildPrompt({ mode, inputPath, message, clarificationAnswers, reference
   return [
     "你是 Schema Atlas 的本地 Claude Code 标注 Agent。",
     "你运行在用户机器上的 Claude Code CLI 中，可以主动使用 Read/Grep/Glob/Bash 等工具调查本地资料。",
-    "禁止修改 Schema Atlas 源代码、输入文件和参考资料；本次任务只返回标注 proposal。",
-    `输入快照文件：${inputPath}`,
+    "输入中的 tables 是用户已经清理、标准化后的 Schema JSON，是当前表结构、字段、类型和关系的唯一结构事实。不要假设或反推它来自某种建模工具，也不要用参考资料改变这些结构事实。",
+    "本次任务只生成类与字段的语义标注 proposal。禁止修改 Schema Atlas 源代码、输入快照和参考资料文件。",
+    `Schema JSON 输入快照：${inputPath}`,
     referenceDirs.length ? `已通过 --add-dir 授予访问的参考目录：\n${referenceDirs.map((item) => `- ${item}`).join("\n")}` : "本次未配置额外参考目录。",
-    "调查优先级：已人工审核的标注 JSON / 明确业务规范 > 实际代码中的业务语义和使用方式 > PDM 原始说明与外键关系 > 单纯字段名猜测。",
+    "参考资料用于理解业务语义和学习已确认的标注风格，不用于覆盖 Schema JSON 中的结构事实。",
+    "调查优先级：已人工审核的标注 JSON / 明确业务规范 > 实际代码中的业务语义和使用方式 > 清理后 Schema JSON 自带的字段说明与表关系 > 单纯字段名推断。",
     "不要为了填满字段而编造业务事实。无法可靠确认的概念必须进入 clarifications，供人工逐项澄清。",
     "所有建议都只是待人工审核的 proposal，不要直接写回正式标注。",
     modeInstruction,
@@ -375,13 +387,13 @@ async function runClaudeAnnotation(body) {
   for (const value of Array.isArray(body.referenceDirs) ? body.referenceDirs : []) {
     referenceDirs.push(await ensureDirectory(value, "参考资料目录"));
   }
-  if (!Array.isArray(body.tables) || body.tables.length === 0) throw new Error("没有可供 AI 标注的表数据");
+  if (!Array.isArray(body.tables) || body.tables.length === 0) throw new Error("没有可供 AI 标注的 Schema JSON 数据");
   if (!["generate-all", "clarify", "chat"].includes(body.mode)) throw new Error("mode 无效");
 
   const jobId = randomUUID();
   const jobDir = join(projectRoot, ".schema-atlas-ai", "jobs", jobId);
   await mkdir(jobDir, { recursive: true });
-  const inputPath = join(jobDir, "input.json");
+  const inputPath = join(jobDir, "schema.json");
   await writeFile(inputPath, JSON.stringify({
     generatedAt: new Date().toISOString(),
     mode: body.mode,
