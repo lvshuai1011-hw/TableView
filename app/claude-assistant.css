@@ -1,0 +1,604 @@
+.claude-assistant-launcher {
+  position: fixed;
+  right: 18px;
+  bottom: 22px;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid rgba(15, 23, 42, .14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .96);
+  color: #172033;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+.claude-assistant-launcher em {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  background: #172033;
+  color: white;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.claude-assistant-panel {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 95;
+  display: grid;
+  width: min(520px, 94vw);
+  grid-template-rows: auto auto auto 1fr;
+  border-left: 1px solid rgba(15, 23, 42, .12);
+  background: #f8fafc;
+  color: #172033;
+  box-shadow: -18px 0 44px rgba(15, 23, 42, .14);
+}
+
+.claude-panel-header {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(15, 23, 42, .1);
+  background: rgba(255, 255, 255, .96);
+}
+
+.claude-panel-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.claude-panel-header > div > div {
+  display: grid;
+  gap: 2px;
+}
+
+.claude-panel-header strong {
+  font-size: 14px;
+}
+
+.claude-panel-header small {
+  color: #718096;
+  font-size: 11px;
+}
+
+.claude-panel-header > button,
+.session-browser-header > button,
+.session-detail-header > button,
+.claude-panel-error button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.claude-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: #172033;
+  color: white;
+}
+
+.claude-panel-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid rgba(15, 23, 42, .08);
+  background: white;
+}
+
+.claude-panel-tabs button {
+  position: relative;
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.claude-panel-tabs button.active {
+  background: #eef2f7;
+  color: #172033;
+  font-weight: 700;
+}
+
+.claude-panel-tabs em {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 999px;
+  background: #172033;
+  color: white;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.claude-panel-error {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  margin: 8px 10px 0;
+  padding: 9px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff1f2;
+  color: #991b1b;
+  font-size: 12px;
+}
+
+.claude-panel-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.claude-review-pane,
+.claude-todo-pane,
+.claude-sessions-pane,
+.claude-settings-pane {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.claude-status-card,
+.claude-proposal-summary,
+.claude-chat-box,
+.clarification-card,
+.session-meta,
+.claude-settings-pane > label,
+.health-details {
+  border: 1px solid rgba(15, 23, 42, .1);
+  border-radius: 12px;
+  background: white;
+}
+
+.claude-status-card {
+  display: grid;
+  gap: 6px;
+  padding: 11px 12px;
+}
+
+.claude-status-card > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.claude-status-card small,
+.claude-status-card code,
+.claude-proposal-summary small,
+.clarification-card small,
+.session-meta small,
+.claude-settings-pane small,
+.health-details span {
+  color: #718096;
+  font-size: 11px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.status-dot.online {
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, .12);
+}
+
+.claude-empty-state {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 22px 18px;
+  border: 1px dashed rgba(15, 23, 42, .2);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .7);
+}
+
+.claude-empty-state p,
+.claude-proposal-summary p,
+.clarification-card p,
+.claude-settings-pane p {
+  margin: 0;
+  color: #526076;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.claude-proposal-summary {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+}
+
+.claude-proposal-summary > div:first-child,
+.claude-chat-box > div:first-child,
+.claude-todo-pane > header > div,
+.session-browser-header > div,
+.claude-settings-pane > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.proposal-stats,
+.clarification-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.claude-proposal-summary ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #526076;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.proposal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.claude-patch-list {
+  display: grid;
+  gap: 8px;
+}
+
+.claude-patch-list details {
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, .1);
+  border-radius: 10px;
+  background: white;
+}
+
+.claude-patch-list summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.claude-patch-list summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.claude-patch-list summary code {
+  font-weight: 700;
+}
+
+.claude-patch-list summary small,
+.column-patches article small {
+  overflow: hidden;
+  color: #718096;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.class-patch,
+.column-patches article {
+  border-top: 1px solid rgba(15, 23, 42, .08);
+}
+
+.class-patch {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.class-patch > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.class-patch p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.column-patches article {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.column-patches article > div {
+  display: grid;
+  gap: 3px;
+}
+
+.column-patches pre,
+.session-message pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.column-patches pre {
+  max-height: 220px;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f1f5f9;
+}
+
+.claude-chat-box {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+}
+
+.claude-chat-box > button,
+.clarification-submit > button {
+  justify-self: end;
+}
+
+.claude-todo-pane > header,
+.claude-settings-pane > header {
+  display: grid;
+  gap: 4px;
+}
+
+.clarification-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.clarification-heading {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+}
+
+.clarification-heading > span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef2f7;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.clarification-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.clarification-card blockquote {
+  margin: 0;
+  padding: 9px 10px;
+  border-left: 3px solid #cbd5e1;
+  background: #f8fafc;
+  color: #526076;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.clarification-scope code {
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: #eef2f7;
+  font-size: 10px;
+}
+
+.session-browser-header,
+.session-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.session-list {
+  display: grid;
+  gap: 6px;
+}
+
+.session-list > button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid rgba(15, 23, 42, .09);
+  border-radius: 9px;
+  background: white;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-list > button > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.session-list strong,
+.session-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-list strong {
+  font-size: 12px;
+}
+
+.session-list small {
+  color: #718096;
+  font-size: 10px;
+}
+
+.session-detail-header > button {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.session-meta {
+  display: grid;
+  gap: 5px;
+  padding: 11px;
+}
+
+.session-meta code {
+  overflow: hidden;
+  color: #526076;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.session-transcript {
+  display: grid;
+  gap: 8px;
+}
+
+.session-message {
+  display: grid;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid rgba(15, 23, 42, .09);
+  border-radius: 10px;
+  background: white;
+}
+
+.session-message.user {
+  margin-left: 28px;
+  background: #eef6ff;
+}
+
+.session-message.assistant {
+  margin-right: 28px;
+}
+
+.session-message.tool {
+  margin-inline: 14px;
+  background: #f8fafc;
+}
+
+.session-message > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #718096;
+  font-size: 10px;
+}
+
+.session-message > div span {
+  color: #334155;
+  font-weight: 800;
+}
+
+.claude-settings-pane > label {
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+}
+
+.claude-settings-pane > label > span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.health-details {
+  display: grid;
+  gap: 7px;
+  padding: 10px 11px;
+}
+
+.health-details > div {
+  display: grid;
+  grid-template-columns: 95px 1fr;
+  gap: 8px;
+}
+
+.health-details code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claude-list-empty {
+  display: flex;
+  min-height: 100px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px dashed rgba(15, 23, 42, .16);
+  border-radius: 10px;
+  color: #718096;
+  font-size: 12px;
+}
+
+.spin {
+  animation: claude-spin .9s linear infinite;
+}
+
+@keyframes claude-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 720px) {
+  .claude-assistant-panel {
+    width: 100vw;
+  }
+
+  .claude-assistant-launcher {
+    right: 12px;
+    bottom: 14px;
+  }
+}
