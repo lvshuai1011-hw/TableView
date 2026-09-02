@@ -48,6 +48,20 @@ npm run start:local
 
 完整安装和参考资料目录配置见 [INSTALL.md](./INSTALL.md)。
 
+## 连接本机 Claude Code
+
+Schema Atlas 不需要 Claude SDK 或 API Key，网页通过本地桥接进程调用 `claude` 命令。首次部署前，以运行服务的 Linux 用户完成一次登录：
+
+```bash
+sudo -iu claude
+claude --version
+claude auth login
+claude auth status
+exit
+```
+
+如果 `auth status` 已显示登录成功，可以跳过 `auth login`。随后执行 `sudo bash scripts/install-systemd.sh`；安装脚本会自动找到该用户的 Node.js 和 Claude Code 路径，并让网页、AI 桥接层随系统启动。页面“AI 标注 → 资料”中可以检查运行账户、CLI 版本、登录状态和允许读取的目录。
+
 ## Claude Code 标注流程
 
 1. 顶部点击“AI 标注”，选择全部域或一个 0级域，配置本地代码仓库、历史标注 JSON 等参考路径。
