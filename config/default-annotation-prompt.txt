@@ -1,6 +1,6 @@
 你正在为 Schema Atlas 标注数据库表 {{table_name}}。当前任务模式：{{mode}}。
 
-你的目标不是复述表名、字段名或程序实现，而是根据可核验资料抽象出可供业务人员理解和复用的本体语义。最终草稿必须完整覆盖类名、类描述、类别名、所有字段的属性名、字段描述、字段别名、布尔标志和能够确认的枚举引用。
+你的目标不是复述表名、字段名或程序实现，而是根据可核验资料抽象出可供业务人员理解和复用的本体语义。最终草稿必须完整覆盖类名、类描述、类别名、所有字段的属性名、字段描述、字段别名、布尔标志和能够确认的枚举引用。除布尔开关及未开启枚举时的枚举字段外，所有输出信息都必须填写，禁止用空字符串或空 aliases 数组占位。
 
 开始前必须完成以下检索：
 1. 完整读取当前工作目录中的 input-table.json 和 dataset-context.json；current-draft.json 存在时也要读取。
@@ -38,8 +38,8 @@ Schema Atlas 后台数据集：
 6. 每个纳入导出的字段都必须填写 detailedDescription，格式与类描述一致：以“中文描述：”开头，再以“English Description:”提供等价英文。内容应说明字段所表达的业务事实、所属对象、作用范围、与其他业务概念的关系以及资料能够证明的约束；不要描述数据库类型、代码读写、SQL 查询、序列器、接口或程序执行过程。
 7. 每个纳入导出的字段都必须提供 2–8 个不重复的 aliases，至少包含自然英文名称和中文业务名称；有可靠资料时补充常用称呼、全称或同义词。别名不能包含未经证实的新业务含义。
 8. isLocalId 仅在字段构成本类实例的局部身份键时设为 true；isCode 仅在字段本身表达业务编码时设为 true；isDisplayName 和 isSemantic 也必须依据资料判断。false 不会导出到最终 JSON。
-9. 枚举识别不能只看字段名。对于 TYPE、CLASS、STATUS、STATE、MODE、LEVEL、CATEGORY、FLAG、CODE 等候选字段，先搜索已有 entity-classes 中的 enum_ref，再查找对应 enums JSON 或原始备注的明确取值。确认后使用原文件的 enum_name 填写 enumRef，并将可读取的 description、values 和 aliases 准确写入 enumDescription 与 enumValues；最终实体属性只引用 enum_ref，枚举定义单独导出。外键 ID、自由文本和没有有限取值证据的字段不得标成枚举。
+9. 枚举识别不能只看字段名。对于 TYPE、CLASS、STATUS、STATE、MODE、LEVEL、CATEGORY、FLAG、CODE 等候选字段，先搜索已有 entity-classes 中的 enum_ref，再查找对应 enums JSON 或原始备注的明确取值。确认后填写 enumRef；若资料没有既有 enum_name，默认使用 entityColumn 首字母大写的名称（例如 accountClass → AccountClass）。enumDescription 必填；enumValues 至少一项；每项的 value、aliases 和 description 都必填。description 是一个同时包含中文与等价英文业务含义的字符串，不要另造 description_en 或 descriptionEn。最终实体属性只引用 enum_ref，枚举定义单独导出。外键 ID、自由文本和没有有限取值证据的字段不得标成枚举。
 10. included 表示字段是否进入 Ontology 和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，无需修改。
 11. reason 应简要写明本次命名、标志或枚举判断所依据的文件与业务证据，方便人工审核。
-12. 遇到含义不明确的概念，必须先检查当前表、原始 remark、直接关联表、关系索引、同域表、现有草稿和全部已配置参考路径。只有仍无明确依据或证据冲突时才能加入 todos。每条 todo 的 checkedSources 必须列出实际检查过的文件或线索，reason 说明缺失或冲突，并尽量给出候选答案。
+12. 遇到含义不明确的概念，必须先检查当前表、原始 remark、直接关联表、关系索引、同域表、现有草稿和全部已配置参考路径。只有仍无明确依据或证据冲突时才能加入 todos。每条 todo 的 checkedSources 必须列出实际检查过的文件或线索，reason 说明缺失或冲突，并尽量给出候选答案。不能因为存在待澄清项就在必填的类名、描述或 aliases 中写空值；应基于已确认资料先给出可审核草稿，并用 todo 标明仍需人工确认的边界。
 13. reply 用简洁中文汇总完成情况、识别出的枚举和仍需人工处理的事项。最终结果必须严格符合指定 JSON Schema。

@@ -39,6 +39,7 @@ import {
   Table2,
   Trash2,
   Upload,
+  RotateCcw,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -108,11 +109,13 @@ import {
   buildExportFiles,
   CHANGE_LOG_STORAGE_KEY,
   ChangeHistoryStore,
+  ChangeRecord,
   ChangeRecordDraft,
   countRelationshipFieldGaps,
   createEmptyChangeHistory,
   createZip,
   defaultClassName,
+  findDeletedTableRecoveryRecord,
   getTableChangeRecords,
   isSelfRelationship,
   inspectRelationshipMappings,
@@ -125,6 +128,7 @@ import {
   migrateTables,
   normalizeDomain1,
   RelationFieldState,
+  restoreTableFromChange,
   validateExportConfiguration,
 } from "./schema-utils";
 
@@ -197,17 +201,6 @@ function uniqueRelationships(tables: Pick<SchemaTable, "foreignKeys" | "referenc
     });
   });
   return [...result.values()];
-}
-
-function tableAuditState(table: SchemaTable) {
-  return {
-    className: table.className,
-    description: table.description,
-    domain0: table.domain0,
-    domain1: table.domain1,
-    columns: table.columns.map((column) => column.name),
-    relationshipCount: uniqueRelationships([table]).length,
-  };
 }
 
 function relationshipNeighbors(tableName: string, relationships: Relationship[]) {
@@ -719,6 +712,8 @@ function AppSidebar({
   onScope,
   onInspectRelations,
   onRequestDelete,
+  recoverableDeletedTables,
+  onRestoreDeletedTable,
   onRenameDomain0,
   onRenameDomain1,
 }: {
@@ -732,6 +727,8 @@ function AppSidebar({
   onScope: (scope: Scope) => void;
   onInspectRelations: (keys: string[], title: string) => void;
   onRequestDelete: (tableNames: string[]) => void;
+  recoverableDeletedTables: { tableName: string; record: ChangeRecord }[];
+  onRestoreDeletedTable: (record: ChangeRecord) => void;
   onRenameDomain0: (domain0: string) => void;
   onRenameDomain1: (domain0: string, domain1: string) => void;
 }) {
@@ -763,6 +760,7 @@ function AppSidebar({
   const availableTableNames = new Set(tables.map((table) => table.tableName));
   const selectedTableNames = [...selectedTables].filter((tableName) => availableTableNames.has(tableName));
   const filteredTableNames = filteredTables.map((table) => table.tableName);
+  const filteredDeletedTables = recoverableDeletedTables.filter(({ tableName }) => !normalizedSearch || tableName.includes(normalizedSearch));
   const allFilteredSelected = filteredTableNames.length > 0 && filteredTableNames.every((tableName) => selectedTables.has(tableName));
 
   const toggleDomain = (domain0: string) => setExpandedDomains((current) => {
@@ -876,6 +874,11 @@ function AppSidebar({
             {!managingTables && <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={13} /></button>}
           </div>)}
           {filteredTables.length === 0 && <div className="catalog-empty">没有匹配的已导入表</div>}
+          {filteredDeletedTables.length > 0 && <section className="deleted-table-catalog">
+            <div className="deleted-table-heading"><span>已删除表</span><em>{filteredDeletedTables.length}</em></div>
+            <p>这里只列出可恢复的表，不展示其他表的变更明细。</p>
+            {filteredDeletedTables.map(({ tableName, record }) => <div className="deleted-table-row" key={tableName}><code>{tableName}</code><button onClick={() => onRestoreDeletedTable(record)}><RotateCcw size={12} />恢复</button></div>)}
+          </section>}
           {relationMatches.length > 0 && <div className="relation-search-results"><div>匹配关系</div>{relationMatches.map((relation) => <button key={relationKey(relation)} onClick={() => onInspectRelations([relationKey(relation)], relation.name)}><GitBranch size={13} /><span>{relation.name}</span></button>)}</div>}
         </TabsContent>
       </Tabs>
@@ -1145,6 +1148,11 @@ function RelationDetail({ relationship, tableIndex }: { relationship: Relationsh
   const excludedCount = inspections.reduce((count, inspection) => count
     + (inspection.parentState === "excluded" ? 1 : 0)
     + (inspection.childState === "excluded" ? 1 : 0), 0);
+  const deleteAction = relationship.deleteConstraint.trim().toUpperCase();
+  const updateAction = relationship.updateConstraint.trim().toUpperCase();
+  const unusualDeleteAction = deleteAction && deleteAction !== "RESTRICT" ? deleteAction : "";
+  const unusualUpdateAction = updateAction && updateAction !== "RESTRICT" ? updateAction : "";
+  const constraintName = relationship.constraintName.trim();
   return <article className="relation-detail">
     <div className="relation-detail-head">
       <div><GitBranch size={16} /><code>{relationship.name}</code></div>
@@ -1166,11 +1174,11 @@ function RelationDetail({ relationship, tableIndex }: { relationship: Relationsh
         <div className={`mapping-endpoint ${parentState}`}><code>{relationship.parentTable}.{mapping.parentColumn}</code>{parentState !== "ok" && <small>{relationFieldStateLabel(parentState, "parent")}</small>}</div>
       </div>;
     })}</div>
-    <div className="constraint-row">
-      <span>删除 <code>{relationship.deleteConstraint}</code></span>
-      <span>更新 <code>{relationship.updateConstraint}</code></span>
-      <span>约束 <code>{relationship.constraintName || "未命名"}</code></span>
-    </div>
+    {(unusualDeleteAction || unusualUpdateAction || constraintName) && <div className="constraint-row">
+      {unusualDeleteAction && <span className="constraint-warning"><CircleAlert size={11} />删除行为 <code>{unusualDeleteAction}</code></span>}
+      {unusualUpdateAction && <span className="constraint-warning"><CircleAlert size={11} />更新行为 <code>{unusualUpdateAction}</code></span>}
+      {constraintName && <span>约束 <code>{constraintName}</code></span>}
+    </div>}
   </article>;
 }
 
@@ -1188,6 +1196,7 @@ function InspectorSheet({
   onEditTable,
   onOpenAi,
   onExportChanges,
+  onRestoreChange,
 }: {
   inspector: Inspector;
   graph: ScopeGraph;
@@ -1202,6 +1211,7 @@ function InspectorSheet({
   onEditTable: (tableName: string) => void;
   onOpenAi: (tableName: string) => void;
   onExportChanges: (tableName: string) => void;
+  onRestoreChange: (record: ChangeRecord) => void;
 }) {
   const tableIndex = useMemo(() => new Map(tables.map((table) => [table.tableName, table])), [tables]);
   const relationIndex = useMemo(() => new Map(relationships.map((relation) => [relationKey(relation), relation])), [relationships]);
@@ -1256,8 +1266,8 @@ function InspectorSheet({
             })}</TableBody></Table>
           </TabsContent>
           <TabsContent value="changes" className="table-change-history">
-            <div className="table-change-toolbar"><div><strong>本表历史</strong><span>导入、类配置、字段与关联外键变更</span></div><Button variant="outline" size="sm" disabled={tableChanges.length === 0} onClick={() => onExportChanges(selectedTable.tableName)}><Download size={13} />导出本表</Button></div>
-            <ChangeRecordList records={tableChanges} emptyText="这张表还没有变更记录" />
+            <div className="table-change-toolbar"><div><strong>本表历史</strong><span>每条有完整前态的记录都可恢复，恢复本身也会留下新记录</span></div><Button variant="outline" size="sm" disabled={tableChanges.length === 0} onClick={() => onExportChanges(selectedTable.tableName)}><Download size={13} />导出本表</Button></div>
+            <ChangeRecordList records={tableChanges} currentTable={selectedTable} onRestore={onRestoreChange} emptyText="这张表还没有变更记录" />
           </TabsContent>
         </Tabs>
       </>}
@@ -1287,7 +1297,7 @@ function DeleteTablesDialog({
       <AlertDialogHeader>
         <div className="delete-dialog-mark"><Trash2 size={20} /></div>
         <AlertDialogTitle>{title}</AlertDialogTitle>
-        <AlertDialogDescription>删除后，相关字段信息和 {affectedRelations.length} 条关系会同时从展示盘移除。需要恢复时可重新导入对应 JSON。</AlertDialogDescription>
+        <AlertDialogDescription>删除后，相关字段信息和 {affectedRelations.length} 条关系会同时从展示盘移除。完整表快照会写入本表变更记录，可在“全部表 → 已删除表”中恢复。</AlertDialogDescription>
       </AlertDialogHeader>
       <div className="delete-table-preview">
         {tableNames.slice(0, 6).map((tableName) => <code key={tableName}>{tableName}</code>)}
@@ -1389,6 +1399,7 @@ export default function Home() {
   const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
   const [fieldTarget, setFieldTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
   const [fieldDeleteTarget, setFieldDeleteTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<ChangeRecord | null>(null);
   const [tableConfigTarget, setTableConfigTarget] = useState<string | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiTableTarget, setAiTableTarget] = useState<string | null>(null);
@@ -1400,6 +1411,14 @@ export default function Home() {
   >(null);
   const [changeHistory, setChangeHistory] = useState<ChangeHistoryStore>(() => createEmptyChangeHistory());
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
+  const recoverableDeletedTables = useMemo(() => {
+    const active = new Set(tables.map((table) => table.tableName));
+    return Object.entries(changeHistory.tables).flatMap(([tableName, records]) => {
+      if (active.has(tableName)) return [];
+      const record = findDeletedTableRecoveryRecord(records);
+      return record ? [{ tableName, record }] : [];
+    }).sort((left, right) => left.tableName.localeCompare(right.tableName));
+  }, [changeHistory, tables]);
   const fieldGapCount = useMemo(() => countRelationshipFieldGaps(relationships, tables), [relationships, tables]);
   const graph = useMemo(() => buildScopeGraph(scope, tables, relationships, depth, direction), [scope, tables, relationships, depth, direction]);
   const selectedFieldTable = fieldTarget ? tables.find((table) => table.tableName === fieldTarget.tableName) : undefined;
@@ -1489,11 +1508,10 @@ export default function Home() {
     });
     const existingIndex = new Map(tables.map((table) => [table.tableName, table]));
     const next = prepared.map((table) => mergeImportedTable(existingIndex.get(table.tableName), table));
-    setTables((current) => {
-      const merged = new Map(current.map((table) => [table.tableName, table]));
-      next.forEach((table) => merged.set(table.tableName, table));
-      return migrateTables([...merged.values()]).sort((a, b) => a.tableName.localeCompare(b.tableName));
-    });
+    const merged = new Map(tables.map((table) => [table.tableName, table]));
+    next.forEach((table) => merged.set(table.tableName, table));
+    const mergedTables = migrateTables([...merged.values()]).sort((a, b) => a.tableName.localeCompare(b.tableName));
+    setTables(mergedTables);
     addChanges(next.map((table) => {
       const before = existingIndex.get(table.tableName);
       return {
@@ -1501,8 +1519,8 @@ export default function Home() {
         label: `${before ? "更新" : "导入"}表 ${table.tableName}`,
         tableName: table.tableName,
         tableSnapshot: makeTableAuditSnapshot(table),
-        ...(before ? { before: tableAuditState(before) } : {}),
-        after: tableAuditState(table),
+        before: before ?? null,
+        after: makeTableAuditSnapshot(table),
       };
     }));
     setImportOpen(false);
@@ -1538,7 +1556,8 @@ export default function Home() {
       label: `删除表 ${table.tableName}`,
       tableName: table.tableName,
       tableSnapshot: makeTableAuditSnapshot(table),
-      before: { ...tableAuditState(table), relationships: affectedRelations.filter((relationship) => relationship.parentTable === table.tableName || relationship.childTable === table.tableName) },
+      before: table,
+      after: null,
     }));
     const cleanupByTable = new Map<string, Relationship[]>();
     affectedRelations.forEach((relationship) => {
@@ -1611,7 +1630,8 @@ export default function Home() {
       tableName: target.tableName,
       fieldName: target.fieldName,
       tableSnapshot: makeTableAuditSnapshot(table),
-      before: { column, relationships: affectedRelations },
+      before: { column, index: table.columns.findIndex((item) => item.name === target.fieldName), relationships: affectedRelations },
+      after: null,
     }];
     relationshipNeighbors(target.tableName, affectedRelations).forEach((tableName) => {
       const relatedTable = tableIndex.get(tableName);
@@ -1650,6 +1670,8 @@ export default function Home() {
     const duplicate = tables.find((item) => item.tableName !== table.tableName && item.className.toLowerCase() === draft.className.trim().toLowerCase());
     if (duplicate) throw new Error(`类名 ${draft.className} 已被 ${duplicate.tableName} 使用`);
     const next = mergeAiDraftIntoTable(table, draft);
+    const validationErrors = validateExportConfiguration([next]);
+    if (validationErrors.length) throw new Error(`Claude 草稿仍有必填项未完成：${validationErrors.slice(0, 3).join("；")}`);
     const before = {
       className: table.className,
       classDescription: table.classDescription,
@@ -1726,6 +1748,46 @@ export default function Home() {
     downloadBlob(new Blob([JSON.stringify(group, null, 2)], { type: "application/json" }), `${tableName}-change-log-${new Date().toISOString().slice(0, 10)}.json`);
   };
 
+  const restoreChange = () => {
+    if (!restoreTarget) return;
+    const record = restoreTarget;
+    const current = tables.find((table) => table.tableName === record.tableName);
+    const restored = restoreTableFromChange(current, record);
+    if (restored === undefined) {
+      setRestoreTarget(null);
+      return toast.error("这条旧记录没有完整前态，无法安全恢复");
+    }
+    if (restored) {
+      const duplicate = tables.find((table) => table.tableName !== restored.tableName && table.className.toLowerCase() === restored.className.toLowerCase());
+      if (duplicate) return toast.error("恢复会造成类名冲突", { description: `${restored.className} 已由 ${duplicate.tableName} 使用。` });
+    }
+    const nextTables = restored === null
+      ? tables.filter((table) => table.tableName !== record.tableName)
+      : current
+        ? tables.map((table) => table.tableName === record.tableName ? restored : table)
+        : [...tables, restored];
+    setTables(migrateTables(nextTables).sort((left, right) => left.tableName.localeCompare(right.tableName)));
+    addChanges([{
+      action: "restore_change",
+      label: `恢复“${record.label}”之前的状态`,
+      tableName: record.tableName,
+      fieldName: record.fieldName,
+      tableSnapshot: restored ? makeTableAuditSnapshot(restored) : current ? makeTableAuditSnapshot(current) : record.tableSnapshot,
+      before: current ?? null,
+      after: restored ? makeTableAuditSnapshot(restored) : null,
+    }]);
+    if (restored === null) {
+      if (scope.level === "focus" && scope.tableName === record.tableName) setScope({ level: "global" });
+      setInspector(null);
+    } else if (!current) {
+      setScope({ level: "focus", tableName: restored.tableName });
+      setInspector({ kind: "table", tableName: restored.tableName });
+    }
+    setCamera({ x: 0, y: 0, scale: 1 });
+    setRestoreTarget(null);
+    toast.success(restored ? `已恢复 ${record.tableName}` : `已恢复到 ${record.tableName} 尚未导入的状态`, { description: "本次恢复已记录，仍可再次恢复到操作前。" });
+  };
+
   const deleteFieldColumn = fieldDeleteTarget
     ? tables.find((table) => table.tableName === fieldDeleteTarget.tableName)?.columns.find((column) => column.name === fieldDeleteTarget.fieldName)
     : undefined;
@@ -1750,6 +1812,8 @@ export default function Home() {
       onScope={enterScope}
       onInspectRelations={inspectRelations}
       onRequestDelete={setDeleteTargets}
+      recoverableDeletedTables={recoverableDeletedTables}
+      onRestoreDeletedTable={setRestoreTarget}
       onRenameDomain0={(domain0) => setRenameTarget({ level: 0, currentName: domain0 })}
       onRenameDomain1={(domain0, domain1) => setRenameTarget({ level: 1, domain0, currentName: domain1 })}
     />
@@ -1794,10 +1858,14 @@ export default function Home() {
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
       onOpenAi={(tableName) => { setInspector(null); setAiTableTarget(tableName); setAiOpen(true); }}
       onExportChanges={exportTableAudit}
+      onRestoreChange={setRestoreTarget}
     />
     <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
     <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
       <AlertDialogContent className="delete-dialog"><AlertDialogHeader><div className="delete-dialog-mark"><Trash2 size={20} /></div><AlertDialogTitle>删除字段 {fieldDeleteTarget?.fieldName}？</AlertDialogTitle><AlertDialogDescription>该字段会从 {fieldDeleteTarget?.tableName} 移除，并清理 {deleteFieldRelations} 条关系中的对应列映射。删除前内容会写入变更记录。</AlertDialogDescription></AlertDialogHeader><div className="delete-table-preview"><code>{fieldDeleteTarget?.tableName}.{fieldDeleteTarget?.fieldName}</code><span>{deleteFieldColumn?.description || "暂无字段说明"}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setFieldDeleteTarget(null)}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={deleteField}><Trash2 size={14} />确认删除字段</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+    </AlertDialog>
+    <AlertDialog open={Boolean(restoreTarget)} onOpenChange={(open) => { if (!open) setRestoreTarget(null); }}>
+      <AlertDialogContent className="restore-dialog"><AlertDialogHeader><div className="restore-dialog-mark"><RotateCcw size={20} /></div><AlertDialogTitle>恢复到这次变更之前？</AlertDialogTitle><AlertDialogDescription>将恢复“{restoreTarget?.label}”发生前与 {restoreTarget?.tableName} 相关的内容。较新的同表编辑可能被覆盖；本次恢复也会生成一条新的可恢复记录。</AlertDialogDescription></AlertDialogHeader><div className="restore-change-preview"><code>{restoreTarget?.tableName}{restoreTarget?.fieldName ? `.${restoreTarget.fieldName}` : ""}</code><span>{restoreTarget ? new Date(restoreTarget.timestamp).toLocaleString("zh-CN", { hour12: false }) : ""}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setRestoreTarget(null)}>取消</AlertDialogCancel><AlertDialogAction onClick={restoreChange}><RotateCcw size={14} />确认恢复</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
     </AlertDialog>
     <ImportDialog open={importOpen} onOpenChange={setImportOpen} pending={pendingTables} errors={importErrors} domain0={importDomain0} onDomain0={setImportDomain0} onFiles={handleFiles} onImport={importTables} />
     <FieldEditorDialog open={Boolean(fieldTarget && selectedFieldTable && selectedField)} table={selectedFieldTable} column={selectedField} onOpenChange={(open) => { if (!open) setFieldTarget(null); }} onSave={saveFieldAnnotation} onDelete={() => { if (fieldTarget) setFieldDeleteTarget(fieldTarget); setFieldTarget(null); }} />

@@ -59,10 +59,14 @@ function normalizeEnumValues(value) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     if (!entry || typeof entry !== "object" || !stringValue(entry.value)) return [];
+    const description = stringValue(entry.description);
+    const legacyEnglish = stringValue(entry.descriptionEn ?? entry.description_en);
+    const combinedDescription = legacyEnglish && !description.includes(legacyEnglish)
+      ? `${description}${description && !/[。！？.!?]$/.test(description) ? "。" : ""}${legacyEnglish}`
+      : description || legacyEnglish;
     return [{
       value: stringValue(entry.value),
-      description: stringValue(entry.description),
-      descriptionEn: stringValue(entry.descriptionEn ?? entry.description_en),
+      description: combinedDescription,
       aliases: stringArray(entry.aliases),
     }];
   });
@@ -93,6 +97,15 @@ export const annotationOutputSchema = {
           items: {
             type: "object",
             additionalProperties: false,
+            allOf: [{
+              if: { properties: { enumRef: { minLength: 1 } }, required: ["enumRef"] },
+              then: {
+                properties: {
+                  enumDescription: { type: "string", minLength: 1 },
+                  enumValues: { type: "array", minItems: 1 },
+                },
+              },
+            }],
             required: [
               "name", "included", "entityColumn", "aliases", "detailedDescription",
               "isLocalId", "isDisplayName", "isSemantic", "isCode", "enumValues", "enumRef",
@@ -101,7 +114,7 @@ export const annotationOutputSchema = {
             properties: {
               name: { type: "string" },
               included: { type: "boolean" },
-              entityColumn: { type: "string" },
+              entityColumn: { type: "string", minLength: 1 },
               aliases: { type: "array", minItems: 2, maxItems: 8, uniqueItems: true, items: { type: "string", minLength: 1 } },
               detailedDescription: {
                 type: "string",
@@ -117,19 +130,18 @@ export const annotationOutputSchema = {
                 items: {
                   type: "object",
                   additionalProperties: false,
-                  required: ["value", "description", "descriptionEn", "aliases"],
+                  required: ["value", "description", "aliases"],
                   properties: {
-                    value: { type: "string" },
-                    description: { type: "string" },
-                    descriptionEn: { type: "string" },
-                    aliases: { type: "array", items: { type: "string" } },
+                    value: { type: "string", minLength: 1 },
+                    description: { type: "string", minLength: 1 },
+                    aliases: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
                   },
                 },
               },
               enumRef: { type: "string" },
               enumDescription: { type: "string" },
               confidence: { type: "string", enum: ["high", "medium", "low"] },
-              reason: { type: "string" },
+              reason: { type: "string", minLength: 1 },
             },
           },
         },

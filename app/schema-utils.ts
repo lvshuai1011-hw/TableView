@@ -59,6 +59,14 @@ function stringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
 }
 
+function combineLegacyEnumDescription(description: unknown, descriptionEn: unknown) {
+  const primary = typeof description === "string" ? description.trim() : "";
+  const english = typeof descriptionEn === "string" ? descriptionEn.trim() : "";
+  if (!english || primary.includes(english)) return primary || english;
+  if (!primary) return english;
+  return `${primary}${/[。！？.!?]$/.test(primary) ? "" : "。"}${english}`;
+}
+
 function enumArray(value: unknown): EnumValue[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
@@ -67,8 +75,7 @@ function enumArray(value: unknown): EnumValue[] {
     if (typeof entry.value !== "string" || !entry.value.trim()) return [];
     return [{
       value: entry.value.trim(),
-      description: typeof entry.description === "string" ? entry.description.trim() : "",
-      descriptionEn: typeof entry.descriptionEn === "string" ? entry.descriptionEn.trim() : "",
+      description: combineLegacyEnumDescription(entry.description, entry.descriptionEn ?? entry.description_en),
       aliases: stringArray(entry.aliases),
     }];
   });
@@ -210,6 +217,8 @@ export function validateExportConfiguration(tables: SchemaTable[]) {
     if (!classKey) errors.push(`${table.tableName} 尚未设置类名`);
     else if (classNames.has(classKey)) errors.push(`类名 ${table.className} 同时用于 ${classNames.get(classKey)} 和 ${table.tableName}`);
     else classNames.set(classKey, table.tableName);
+    if (!table.classDescription.trim()) errors.push(`${table.tableName} 尚未填写类的中英文业务说明`);
+    if (table.classAliases.length === 0) errors.push(`${table.tableName} 尚未填写类别名`);
 
     const attributes = new Set<string>();
     table.columns.filter((column) => migrateColumn(column).annotation!.included).forEach((column) => {
@@ -218,7 +227,17 @@ export function validateExportConfiguration(tables: SchemaTable[]) {
       if (!attributeKey) errors.push(`${table.tableName}.${column.name} 尚未设置属性名`);
       else if (attributes.has(attributeKey)) errors.push(`${table.className} 中属性名 ${annotation.entityColumn} 重复`);
       else attributes.add(attributeKey);
+      if (!annotation.detailedDescription.trim()) errors.push(`${table.tableName}.${column.name} 尚未填写中英文业务说明`);
+      if (annotation.aliases.length === 0) errors.push(`${table.tableName}.${column.name} 尚未填写字段别名`);
       if (!annotation.enumRef) return;
+      if (!annotation.enumDescription.trim()) errors.push(`${table.tableName}.${column.name} 尚未填写枚举说明`);
+      if (annotation.enumValues.length === 0) errors.push(`${table.tableName}.${column.name} 已开启枚举，但尚未添加枚举值`);
+      annotation.enumValues.forEach((value, index) => {
+        const location = `${table.tableName}.${column.name} 的第 ${index + 1} 个枚举值`;
+        if (!value.value.trim()) errors.push(`${location} 尚未填写 value`);
+        if (!value.description.trim()) errors.push(`${location} 尚未填写中英文说明`);
+        if (value.aliases.length === 0) errors.push(`${location} 尚未填写别名`);
+      });
       const enumKey = `${table.domain0.toLowerCase()}/${annotation.enumRef.toLowerCase()}`;
       const current = enums.get(enumKey) ?? { description: annotation.enumDescription, values: new Map<string, EnumValue>() };
       if (current.description && annotation.enumDescription && current.description !== annotation.enumDescription) {
@@ -298,9 +317,8 @@ export function buildExportFiles(tables: SchemaTable[]): ExportFile[] {
       description: item.description,
       values: item.values.map((value) => ({
         value: value.value,
-        description: value.description,
-        description_en: value.descriptionEn,
         aliases: value.aliases,
+        description: value.description,
       })),
     }, null, 2)}\n`,
   }));
@@ -396,7 +414,8 @@ export type ChangeAction =
   | "update_class_name"
   | "update_relationship"
   | "rename_domain0"
-  | "rename_domain1";
+  | "rename_domain1"
+  | "restore_change";
 
 export type TableAuditSnapshot = {
   tableName: string;
@@ -467,10 +486,146 @@ const CHANGE_ACTIONS = new Set<ChangeAction>([
   "update_relationship",
   "rename_domain0",
   "rename_domain1",
+  "restore_change",
 ]);
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function schemaTableFromUnknown(value: unknown, tableName?: string): SchemaTable | undefined {
+  const source = objectValue(value);
+  if (!source || typeof source.tableName !== "string" || (tableName && source.tableName !== tableName)) return undefined;
+  if (!Array.isArray(source.columns) || !source.columns.every((column) => {
+    const entry = objectValue(column);
+    return entry && typeof entry.name === "string";
+  })) return undefined;
+  if (!Array.isArray(source.foreignKeys) || !Array.isArray(source.referencedBy)) return undefined;
+  return migrateTables([source as unknown as SchemaTable])[0];
+}
+
+function relationshipsFromUnknown(value: unknown): Relationship[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((item) => {
+    const source = objectValue(item);
+    if (!source || typeof source.parentTable !== "string" || typeof source.childTable !== "string" || !Array.isArray(source.columnMapping)) return [];
+    return [item as Relationship];
+  });
+}
+
+function relationshipIdentity(relationship: Relationship) {
+  return `${relationship.parentTable}>${relationship.childTable}|${relationship.constraintName || relationship.name}`;
+}
+
+function restoreRelationships(table: SchemaTable, previous: Relationship[], changed: Relationship[] = []) {
+  const identities = new Set([...previous, ...changed].map(relationshipIdentity));
+  const foreignKeys = table.foreignKeys.filter((relationship) => !identities.has(relationshipIdentity(relationship)));
+  const referencedBy = table.referencedBy.filter((relationship) => !identities.has(relationshipIdentity(relationship)));
+  previous.forEach((relationship) => {
+    if (relationship.childTable === table.tableName && !foreignKeys.some((item) => relationshipIdentity(item) === relationshipIdentity(relationship))) {
+      foreignKeys.push(relationship);
+    }
+    if (relationship.parentTable === table.tableName && !referencedBy.some((item) => relationshipIdentity(item) === relationshipIdentity(relationship))) {
+      referencedBy.push(relationship);
+    }
+  });
+  return { ...table, foreignKeys, referencedBy };
+}
+
+/**
+ * Restores the state immediately before one table-scoped change. `null` means
+ * that the table did not exist before the change; `undefined` means the legacy
+ * record does not contain enough information to recover safely.
+ */
+export function restoreTableFromChange(currentTable: SchemaTable | undefined, record: ChangeRecord): SchemaTable | null | undefined {
+  if (record.action === "import_tables" || record.action === "delete_table" || record.action === "restore_change") {
+    if (!Object.prototype.hasOwnProperty.call(record, "before")) return undefined;
+    if (record.before === null) return null;
+    return schemaTableFromUnknown(record.before, record.tableName);
+  }
+  if (!currentTable) return undefined;
+
+  if (record.action === "update_field") {
+    if (!record.fieldName || !objectValue(record.before) || !currentTable.columns.some((column) => column.name === record.fieldName)) return undefined;
+    return {
+      ...currentTable,
+      columns: currentTable.columns.map((column) => column.name === record.fieldName
+        ? migrateColumn({ ...column, annotation: record.before as ColumnAnnotation })
+        : column),
+    };
+  }
+
+  if (record.action === "delete_field") {
+    const before = objectValue(record.before);
+    const column = objectValue(before?.column) as Column | undefined;
+    if (!column || typeof column.name !== "string") return undefined;
+    const columns = currentTable.columns.filter((item) => item.name !== column.name);
+    const index = typeof before?.index === "number" && Number.isInteger(before.index)
+      ? Math.max(0, Math.min(before.index, columns.length))
+      : columns.length;
+    columns.splice(index, 0, migrateColumn(column));
+    const previousRelationships = relationshipsFromUnknown(before?.relationships) ?? [];
+    return restoreRelationships({ ...currentTable, columns }, previousRelationships);
+  }
+
+  if (record.action === "apply_ai_draft") {
+    const before = objectValue(record.before);
+    const annotations = objectValue(before?.annotations);
+    if (!before || !annotations) return undefined;
+    return {
+      ...currentTable,
+      className: typeof before.className === "string" ? before.className : currentTable.className,
+      classDescription: typeof before.classDescription === "string" ? before.classDescription : currentTable.classDescription,
+      classAliases: stringArray(before.classAliases),
+      columns: currentTable.columns.map((column) => Object.prototype.hasOwnProperty.call(annotations, column.name)
+        ? migrateColumn({ ...column, annotation: annotations[column.name] as ColumnAnnotation })
+        : column),
+    };
+  }
+
+  if (record.action === "update_class_name") {
+    const before = objectValue(record.before);
+    if (!before) return undefined;
+    return {
+      ...currentTable,
+      className: typeof before.className === "string" ? before.className : currentTable.className,
+      classDescription: typeof before.classDescription === "string" ? before.classDescription : currentTable.classDescription,
+      classAliases: stringArray(before.classAliases),
+    };
+  }
+
+  if (record.action === "rename_domain0" || record.action === "rename_domain1") {
+    const before = objectValue(record.before);
+    const legacyDomain = typeof record.before === "string" ? record.before : "";
+    if (!before && !legacyDomain) return undefined;
+    const domain0 = record.action === "rename_domain0"
+      ? typeof before?.domain0 === "string" ? before.domain0 : legacyDomain
+      : currentTable.domain0;
+    const domain1 = record.action === "rename_domain1"
+      ? typeof before?.domain1 === "string" ? normalizeDomain1(before.domain1) : normalizeDomain1(legacyDomain)
+      : currentTable.domain1;
+    return { ...currentTable, domain0, domain1, folder: domain1 };
+  }
+
+  if (record.action === "update_relationship") {
+    const previous = relationshipsFromUnknown(record.before);
+    const changed = relationshipsFromUnknown(record.after);
+    if (!previous || !changed) return undefined;
+    return restoreRelationships(currentTable, previous, changed);
+  }
+
+  return undefined;
+}
+
+export function isChangeRestorable(record: ChangeRecord, currentTable?: SchemaTable) {
+  return restoreTableFromChange(currentTable, record) !== undefined;
+}
+
+export function findDeletedTableRecoveryRecord(records: ChangeRecord[]) {
+  return records.find((record) => {
+    const restored = restoreTableFromChange(undefined, record);
+    return restored !== undefined && restored !== null;
+  });
 }
 
 function snapshotFromUnknown(value: unknown, tableName: string): TableAuditSnapshot | undefined {
@@ -592,10 +747,11 @@ export function getTableChangeRecords(history: ChangeHistoryStore, tableName: st
 export function buildTableChangeHistoryExport(history: ChangeHistoryStore, tableName: string) {
   const changes = history.tables[tableName] ?? [];
   if (changes.length === 0) return undefined;
+  const latest = changes[0];
   return {
     schemaVersion: 2,
     table: changes.find((record) => record.tableSnapshot)?.tableSnapshot ?? { tableName, className: "", description: "", domain0: "", domain1: "" },
-    deleted: changes[0]?.action === "delete_table",
+    deleted: latest?.action === "delete_table" || (latest?.action === "restore_change" && latest.after === null),
     changes,
   };
 }

@@ -3,7 +3,6 @@ export type ExportDataType = "number" | "string" | "datetime" | "boolean" | "unk
 export type EnumValue = {
   value: string;
   description: string;
-  descriptionEn: string;
   aliases: string[];
 };
 

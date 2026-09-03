@@ -51,7 +51,8 @@ import { Textarea } from "@/components/ui/textarea";
 import DEFAULT_ANNOTATION_PROMPT from "../config/default-annotation-prompt.txt?raw";
 import DEFAULT_BATCH_INSTRUCTION_TEXT from "../config/default-batch-instruction.txt?raw";
 import DEFAULT_TABLE_INSTRUCTION_TEXT from "../config/default-table-instruction.txt?raw";
-import { summarizeAiDraft } from "./ai-utils";
+import { mergeAiDraftIntoTable, summarizeAiDraft } from "./ai-utils";
+import { validateExportConfiguration } from "./schema-utils";
 import type {
   AiDataset,
   AiHealth,
@@ -523,6 +524,9 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const draftSummary = activeTable && selectedSession?.draft && selectedSession.draft.tableName === activeTable.tableName
     ? summarizeAiDraft(activeTable, selectedSession.draft)
     : null;
+  const draftValidationErrors = activeTable && selectedSession?.draft && selectedSession.draft.tableName === activeTable.tableName
+    ? validateExportConfiguration([mergeAiDraftIntoTable(activeTable, selectedSession.draft)])
+    : [];
   const unknownPromptVariables = [...promptTemplate.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)]
     .map((match) => match[1])
     .filter((key, index, items) => !PROMPT_VARIABLES.includes(key) && items.indexOf(key) === index);
@@ -575,7 +579,8 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
                     {column.reason && <small>{column.reason}</small>}
                   </article>)}</div>
                 </details>
-                <Button onClick={applyDraft} disabled={chatBusy || selectedSession.status === "applied"}>{selectedSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{selectedSession.status === "applied" ? "草稿已应用" : "审核后应用到当前表"}</Button>
+                {draftValidationErrors.length > 0 && <div className="ai-draft-validation" role="alert"><CircleAlert size={15} /><div><strong>草稿还有必填项未完成</strong><span>{draftValidationErrors.slice(0, 4).join("；")}{draftValidationErrors.length > 4 ? `；另有 ${draftValidationErrors.length - 4} 项` : ""}</span></div></div>}
+                <Button onClick={applyDraft} disabled={chatBusy || selectedSession.status === "applied" || draftValidationErrors.length > 0}>{selectedSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{selectedSession.status === "applied" ? "草稿已应用" : "审核后应用到当前表"}</Button>
               </section>}
               {currentTodos.length > 0 && <section className="ai-table-todos"><h3>需要人工确认 <span>{currentTodos.length}</span></h3>{currentTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}</section>}
             </> : <EmptyState icon={Bot} title="为当前表建立 AI 会话" detail="Claude Code 会读取表结构、上下游关系和你配置的本地参考资料，先生成一版供人工审核。" />}

@@ -25,7 +25,6 @@ export function mergeAiDraftIntoTable(table: SchemaTable, draft: AiTableDraft): 
         enumValues: proposed.enumValues.map((item) => ({
           value: item.value.trim(),
           description: item.description.trim(),
-          descriptionEn: item.descriptionEn.trim(),
           aliases: [...new Set(item.aliases.map((alias) => alias.trim()).filter(Boolean))],
         })).filter((item) => item.value),
         enumRef: proposed.enumRef.trim(),

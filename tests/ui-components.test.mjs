@@ -172,7 +172,7 @@ test("writes enum references and definitions as separate files", async () => {
         isDisplayName: false,
         isSemantic: false,
         isCode: false,
-        enumValues: [{ value: "D", description: "日限额", descriptionEn: "Daily limit", aliases: [] }],
+        enumValues: [{ value: "D", description: "日限额。Daily limit.", aliases: ["Daily limit", "日限额"] }],
         enumRef: "QuotaCycleType",
         enumDescription: "免费资源代付限额周期类型",
       },
@@ -187,7 +187,12 @@ test("writes enum references and definitions as separate files", async () => {
   assert.equal(ontology.attributes[0].enum_ref, "QuotaCycleType");
   assert.equal(ontology.attributes[0].is_local_id, undefined);
   assert.equal(ontology.attributes[0].is_code, undefined);
-  assert.equal(enumFile.values[0].description_en, "Daily limit");
+  assert.deepEqual(enumFile.values[0], {
+    value: "D",
+    aliases: ["Daily limit", "日限额"],
+    description: "日限额。Daily limit.",
+  });
+  assert.equal("description_en" in enumFile.values[0], false);
 });
 
 test("keeps an existing enum reference without inventing an empty enum definition", async () => {
@@ -396,4 +401,81 @@ test("keeps history accessible only through each affected table", async () => {
   assert.equal(exported.table.tableName, "TABLE_A");
   assert.equal(exported.changes.length, 4);
   assert.equal(buildTableChangeHistoryExport(history, "TABLE_UNKNOWN"), undefined);
+});
+
+test("restores table-scoped field and deletion changes without a global history", async () => {
+  const {
+    appendChangeRecords,
+    findDeletedTableRecoveryRecord,
+    makeTableAuditSnapshot,
+    migrateTables,
+    restoreTableFromChange,
+  } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const [table] = migrateTables([{
+    tableName: "TABLE_A",
+    className: "DemoEntity",
+    classDescription: "中文描述：演示实体。 English Description: Demo entity.",
+    classAliases: ["Demo entity", "演示实体"],
+    description: "演示实体",
+    folder: "",
+    domain0: "Demo",
+    domain1: "",
+    columns: [{ name: "ID", description: "标识", dataType: "NUMBER(20)", length: "20", isPrimaryKey: true, nullable: false, remark: "" }],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+  const originalAnnotation = {
+    ...table.columns[0].annotation,
+    aliases: ["Identifier", "标识"],
+    detailedDescription: "中文描述：演示标识。 English Description: Demo identifier.",
+  };
+  const edited = {
+    ...table,
+    columns: [{ ...table.columns[0], annotation: { ...originalAnnotation, entityColumn: "changedID" } }],
+  };
+  const updateRecord = {
+    id: "update",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    action: "update_field",
+    label: "更新字段",
+    tableName: table.tableName,
+    fieldName: "ID",
+    before: originalAnnotation,
+    after: edited.columns[0].annotation,
+  };
+  assert.equal(restoreTableFromChange(edited, updateRecord).columns[0].annotation.entityColumn, originalAnnotation.entityColumn);
+
+  const deleteRecordDraft = {
+    action: "delete_table",
+    label: "删除表 TABLE_A",
+    tableName: table.tableName,
+    tableSnapshot: makeTableAuditSnapshot(table),
+    before: table,
+    after: null,
+  };
+  const history = appendChangeRecords({ version: 2, tables: {} }, [deleteRecordDraft]);
+  const recoveryRecord = findDeletedTableRecoveryRecord(history.tables.TABLE_A);
+  assert.ok(recoveryRecord);
+  assert.equal(restoreTableFromChange(undefined, recoveryRecord).tableName, "TABLE_A");
+});
+
+test("requires descriptions and aliases before exporting an included field", async () => {
+  const { migrateTables, validateExportConfiguration } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const [table] = migrateTables([{
+    tableName: "TABLE_REQUIRED",
+    className: "RequiredEntity",
+    classDescription: "",
+    classAliases: [],
+    description: "",
+    folder: "",
+    domain0: "Demo",
+    domain1: "",
+    columns: [{ name: "STATUS", description: "", dataType: "VARCHAR2(1)", length: "1", isPrimaryKey: false, nullable: false, remark: "" }],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+  const errors = validateExportConfiguration([table]);
+  assert.ok(errors.some((error) => error.includes("类别名")));
+  assert.ok(errors.some((error) => error.includes("字段别名")));
+  assert.ok(errors.some((error) => error.includes("中英文业务说明")));
 });
