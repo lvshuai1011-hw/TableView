@@ -46,6 +46,13 @@ test("emits the catalog's animation and scrolling utilities", async () => {
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
 });
 
+test("centers review queues without moving the left-aligned workbench tabs", async () => {
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+
+  assert.match(css, /\.ai-tabs[^\n]+justify-content:\s*flex-start/);
+  assert.match(css, /\.ai-review-list, \.ai-todo-list[^\n]+margin-inline:\s*auto\s*!important/);
+});
+
 test("forwards progress semantics to the primitive", async () => {
   const { Progress } = await vite.ssrLoadModule("/components/ui/progress.tsx");
   const html = renderToStaticMarkup(React.createElement(Progress, { value: 37 }));
