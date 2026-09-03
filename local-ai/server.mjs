@@ -111,7 +111,7 @@ function parseLines(onLine) {
   };
 }
 
-function claudeArguments(session, prompt, referencePaths, datasetDirectory) {
+function claudeArguments(session, referencePaths, datasetDirectory) {
   const args = [
     "-p",
     "--dangerously-skip-permissions",
@@ -124,7 +124,6 @@ function claudeArguments(session, prompt, referencePaths, datasetDirectory) {
   [...new Set([...referencePaths.map((entry) => entry.addDir), datasetDirectory].filter(Boolean))].forEach((directory) => {
     args.push("--add-dir", directory);
   });
-  args.push(prompt);
   return args;
 }
 
@@ -154,13 +153,15 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
   const events = [];
   const stderr = [];
   let rawWrite = Promise.resolve();
-  const child = spawn(claudeBin, claudeArguments(session, prompt, referencePaths, datasetContext.datasetDir), {
+  const child = spawn(claudeBin, claudeArguments(session, referencePaths, datasetContext.datasetDir), {
     cwd: workspace,
     env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     shell: false,
   });
   runningSessions.set(session.id, child);
+  child.stdin.on("error", () => {});
+  child.stdin.end(prompt);
 
   const parser = parseLines((line) => {
     let event;

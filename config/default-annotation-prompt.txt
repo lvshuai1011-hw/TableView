@@ -5,8 +5,14 @@
 Schema Atlas 后台数据集：
 {{dataset_context}}
 
-本地参考资料：
+本地参考资料（以下路径由用户配置，已列在 reference_paths 中）：
 {{reference_paths}}
+
+参考资料用途约定：
+- DB、RB、WEB 目录主要用于理解字段的业务含义：在判断字段语义、枚举取值、布尔标志、别名和 detailedDescription 时，优先在这些目录的代码、SQL、配置和已标注 JSON 中检索证据。
+- Teleco_Context 目录主要用于参考字段应如何标注（即格式与写法）：在确定 className、entityColumn、枚举与布尔标志的表达方式、detailedDescription 的描述粒度等格式问题时，以 Teleco_Context 中已有的标注为范本。
+- 当某个字段名在 Teleco_Context 与 DB/RB/WEB 中完全相同时，可以同时参考 Teleco_Context 的标注格式与 DB/RB/WEB 的业务含义。
+- 仍需遵循生成规则：只有上述资料中没有明确依据、或不同资料互相冲突时，才加入 todos。
 
 已有人工澄清：
 {{clarifications}}
