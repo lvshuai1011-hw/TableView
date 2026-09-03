@@ -124,7 +124,7 @@ English Description: Provide an equivalent English business-semantic description
 
 ### classAliases
 
-提供 4–12 个有意义且不重复的中英文别名，覆盖：
+提供多个有意义且不重复的中英文别名，并同时覆盖：
 
 - 正式业务名称
 - 常用业务称呼
@@ -152,7 +152,7 @@ English Description: Provide an equivalent English business-semantic description
 
 ### aliases
 
-每个字段提供 2–8 个不重复的别名，至少包含：
+每个字段提供多个不重复的别名，并同时包含：
 
 - 一个自然英文名称
 - 一个中文业务名称
@@ -200,7 +200,7 @@ English Description: Provide an equivalent English business-semantic description
 - 优先复用当前业务域中语义和取值一致的 `enum_name`
 - 没有可复用名称时，使用 `entityColumn` 首字母大写后的名称，例如 `accountClass` 对应 `AccountClass`
 - `enumDescription` 必须包含完整的中英文业务说明
-- `enumValues` 至少包含一项
+- `enumValues` 必须列出所有能够确认的枚举值，不得为空
 - 每个枚举值的 `value`、`aliases` 和 `description` 都必须填写
 - `description` 使用一个同时包含中文和等价英文含义的字符串
 - 不得创建 `description_en` 或 `descriptionEn`
@@ -210,7 +210,7 @@ English Description: Provide an equivalent English business-semantic description
 
 ## 字段分析与证据
 
-每个字段必须填写 `analysisSummary`，使用 3–6 句中文说明：
+每个字段必须填写简洁、可审核的中文 `analysisSummary`，说明：
 
 - 对字段业务含义的理解
 - `entityColumn` 的命名依据

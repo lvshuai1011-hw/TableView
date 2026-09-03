@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   AtlasStore,
+  annotationOutputSchema,
   buildAnnotationPrompt,
   normalizePromptTemplate,
   normalizeStructuredOutput,
@@ -104,7 +105,7 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /仍然无法确认/);
   assert.match(prompt, /checkedSources/);
   assert.match(prompt, /PE_FREE_UNIT_TYPE\.json/);
-  assert.match(prompt, /提供 4–12 个/);
+  assert.match(prompt, /提供多个有意义且不重复的中英文别名/);
   assert.match(prompt, /enum_ref/);
   assert.match(prompt, /analysisSummary/);
   assert.match(prompt, /English Description/);
@@ -113,6 +114,13 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /不能通过字段名称、前缀或后缀推测/);
   assert.match(prompt, /均由人工标注/);
   assert.doesNotMatch(prompt, /TYPE、CLASS、STATUS/);
+  assert.doesNotMatch(prompt, /3–6|4–12|2–8/);
+});
+
+test("does not reject Claude output by text length, item count, or formatting patterns", () => {
+  const schema = JSON.stringify(annotationOutputSchema);
+
+  assert.doesNotMatch(schema, /"minLength"|"maxLength"|"minItems"|"maxItems"|"uniqueItems"|"pattern"/);
 });
 
 test("keeps human-only flags unchanged in Claude output and accepts them in manual review", () => {

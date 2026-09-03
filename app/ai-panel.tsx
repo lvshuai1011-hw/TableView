@@ -79,7 +79,7 @@ const PROMPT_VARIABLES = ["table_name", "mode", "dataset_context", "reference_pa
 function withFieldAnalysisRequirement(value: string) {
   const prompt = value.trim();
   if (!prompt || /\banalysisSummary\b/.test(prompt)) return prompt;
-  return `${prompt}\n\n补充的逐字段审核输出要求：每个字段必须填写 analysisSummary，用 3–6 句中文解释业务理解、entityColumn 与 aliases 命名、枚举证据、外键语义及不确定性；reason 只列可回查的具体证据来源。isLocalId、isCode、isDisplayName 和 isSemantic 是人工标志，不要判断或修改。`;
+  return `${prompt}\n\n补充的逐字段审核输出要求：每个字段必须填写简洁、可审核的 analysisSummary，解释业务理解、entityColumn 与 aliases 命名、枚举证据、外键语义及不确定性；reason 只列可回查的具体证据来源。isLocalId、isCode、isDisplayName 和 isSemantic 是人工标志，不要判断或修改。`;
 }
 
 function withBatchFieldAnalysisRequirement(value: string) {
