@@ -79,13 +79,13 @@ const PROMPT_VARIABLES = ["table_name", "mode", "dataset_context", "reference_pa
 function withFieldAnalysisRequirement(value: string) {
   const prompt = value.trim();
   if (!prompt || /\banalysisSummary\b/.test(prompt)) return prompt;
-  return `${prompt}\n\n补充的逐字段审核输出要求：每个字段必须填写 analysisSummary，用 3–6 句中文解释业务理解、entityColumn 与 aliases 命名、布尔开关、枚举、外键语义及不确定性；reason 只列可回查的具体证据来源。`;
+  return `${prompt}\n\n补充的逐字段审核输出要求：每个字段必须填写 analysisSummary，用 3–6 句中文解释业务理解、entityColumn 与 aliases 命名、枚举证据、外键语义及不确定性；reason 只列可回查的具体证据来源。isLocalId、isCode、isDisplayName 和 isSemantic 是人工标志，不要判断或修改。`;
 }
 
 function withBatchFieldAnalysisRequirement(value: string) {
   const instruction = value.trim();
   if (!instruction || instruction.includes("AI 标注分析")) return instruction;
-  return `${instruction}\n每个字段还必须生成可供人工审核的 AI 标注分析，并说明命名、别名、开关、枚举、关系语义与不确定性。`;
+  return `${instruction}\n每个字段还必须生成可供人工审核的 AI 标注分析，并说明命名、别名、枚举证据、关系语义与不确定性。isLocalId、isCode、isDisplayName 和 isSemantic 由人工设置，不要判断或修改。`;
 }
 
 function statusLabel(status: string) {
@@ -440,7 +440,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const prepareClaudeRevision = (fieldName?: string) => {
     if (!activeTable) return;
     const request = fieldName
-      ? `请只重新审核字段 ${activeTable.tableName}.${fieldName}。请结合导入字段资料、外键关系和已配置参考资料，修订它的 attr_name、详细中英文业务语义、aliases、布尔标志及枚举配置，并同步更新供人工审核的 analysisSummary 和证据 reason；不要改动无关字段。`
+      ? `请只重新审核字段 ${activeTable.tableName}.${fieldName}。请结合导入字段资料、外键关系和已配置参考资料，修订它的 attr_name、详细中英文业务语义、aliases 及有明确证据的枚举配置，并同步更新供人工审核的 analysisSummary 和证据 reason；isLocalId、isCode、isDisplayName 和 isSemantic 由人工设置，不要判断或修改，也不要改动无关字段。`
       : `请只重新审核表 ${activeTable.tableName} 的类级标注。请结合已配置参考资料，修订 class_name、详细中英文业务语义和 aliases；不要改动无关字段。`;
     setChatMessage(request);
     queueMicrotask(() => workComposerRef.current?.focus());
@@ -735,7 +735,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
               <aside className="ai-generation-config">
                 <section className="ai-generation-settings">
                   <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">自动保存</Badge></div>
-                  <p>单表首次生成、批量生成和后续修订共用此模板；每一轮的具体要求会替换对应占位符。</p>
+                  <p>单表首次生成、批量生成和后续修订共用此模板。默认模板优先检索原始 JSON 与 RB、WEB、DB，Teleco_Context 仅限量用于校准格式。</p>
                   <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
                   <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
                   {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}

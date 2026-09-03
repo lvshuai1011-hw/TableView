@@ -466,7 +466,12 @@ async function handleDraftUpdate(request, response, sessionId) {
   if (!body.draft || typeof body.draft !== "object") {
     return jsonResponse(response, 400, { error: "缺少有效的审核草稿" });
   }
-  const normalized = normalizeStructuredOutput({ draft: body.draft, reply: "", todos: [] }, body.table, session.id);
+  const normalized = normalizeStructuredOutput(
+    { draft: body.draft, reply: "", todos: [] },
+    body.table,
+    session.id,
+    { allowManualFlags: true },
+  );
   session.draft = normalized.draft;
   session.status = session.todos.some((todo) => todo.status === "open" && todo.blocking) ? "needs_clarification" : "draft_ready";
   session.error = null;

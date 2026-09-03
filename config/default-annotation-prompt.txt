@@ -1,46 +1,263 @@
-你正在为 Schema Atlas 标注数据库表 {{table_name}}。当前任务模式：{{mode}}。
+你正在为 Schema Atlas 标注数据库表 {{table_name}}。
+当前任务模式：{{mode}}。
 
-你的目标不是复述表名、字段名或程序实现，而是根据可核验资料抽象出可供业务人员理解和复用的本体语义。最终草稿必须完整覆盖类名、类描述、类别名、所有字段的属性名、字段描述、字段别名、布尔标志、能够确认的枚举引用，以及供人工审核的逐字段 AI 标注分析。除布尔开关及未开启枚举时的枚举字段外，所有输出信息都必须填写，禁止用空字符串或空 aliases 数组占位。
+## 任务目标
 
-开始前必须完成以下检索：
-1. 完整读取当前工作目录中的 input-table.json 和 dataset-context.json；current-draft.json 存在时也要读取。
-2. 根据 dataset-context.json 与关系索引读取全部已导入的直接父表、子表及外键字段；再按需读取同一 0级域中的其他表。
-3. 阅读用户配置的本地参考资料，搜索代码、SQL、配置、领域文档和已经标注好的 JSON。代码只作为理解业务概念的证据，不要把类名、方法流程、接口调用或 SQL 实现写进业务描述。
-4. 对疑似枚举字段，必须额外搜索参考资料中的 `**/ontologies/**/entity-classes/*.json`、`**/ontologies/**/enums/*.json`，以及字段注释中的取值范围。
+请依据可核验的业务资料，为当前表生成一版完整、可供人工审核的本体标注草稿。
+
+标注的重点是解释这张表及其字段在业务上代表什么、承担什么职责、与哪些业务对象有关。不要复述数据库名称，也不要在描述中介绍代码实现、SQL、接口调用或程序流程。
+
+草稿必须包含：
+
+- 类名、类描述和类别名
+- 所有原始字段对应的本体属性名、详细描述和字段别名
+- 有充分证据支持的枚举引用及完整枚举定义
+- 每个字段的分析摘要和证据来源
+- 无法确认时需要人工处理的待澄清事项
+
+所有类描述、类别名、字段描述和字段别名都必须填写，不得用空字符串或空 aliases 数组占位。
+
+`isLocalId`、`isCode`、`isDisplayName`、`isSemantic` 均由人工标注。Claude 不得判断、新增或修改这些值；如果 `current-draft.json` 已经包含人工设置，则原样保留，否则保持系统默认值。
+
+## 资料的用途
+
+### 业务语义证据
+
+以下资料用于判断当前表和字段的实际业务含义，按优先顺序使用：
+
+1. `input-table.json` 中的表描述、字段 `description`、字段 `remark`、主键、外键和原始取值说明。
+2. `dataset-context.json` 与关系索引中的直接父表、子表、外键方向和字段映射。
+3. RB、WEB、DB 目录中的代码、SQL、配置、常量、校验条件、固定赋值和使用上下文。
+4. 当前 0 级域中与本表存在直接业务关系的其他表。
+5. 与当前业务对象一致，并且能够被其他资料印证的既有 Ontology 标注。
+
+### 格式参考
+
+`Teleco_Context` 只用于了解：
+
+- Ontology JSON 的结构
+- 中英文描述应达到的详细程度
+- aliases 的数量和表达方式
+- `enum_ref` 与枚举文件的组织格式
+
+每个任务最多读取 `Teleco_Context` 中一个有代表性的 entity-class 文件。需要确认枚举输出结构时，可以额外读取一个 enum 文件。
+
+不得在 `Teleco_Context` 中反复搜索当前表名或全部字段名，不得批量遍历其中的 entity-classes 和 enums，也不能把其他业务对象的名称、描述、别名或枚举值套用到当前表。
+
+`Teleco_Context` 只能回答“标注结果应该怎样表达”，不能作为当前表业务含义的证据。
+
+## 检索流程
+
+1. 完整读取当前工作目录中的：
+
+   - `input-table.json`
+   - `dataset-context.json`
+   - `current-draft.json`（如果存在）
+
+2. 分析当前表的原始信息：
+
+   - 表描述对应什么业务对象
+   - 主键标识什么实体
+   - `foreignKeys` 表明当前表依赖哪些父表
+   - `referencedBy` 表明哪些子表依赖当前表
+   - 字段描述和备注提供了哪些业务事实、取值及约束
+
+3. 在 RB、WEB、DB 中精确搜索当前 `tableName`。
+
+   阅读命中的表定义、SQL、配置、对象映射和直接使用上下文，建立表级业务理解。
+
+4. 逐个搜索当前表的字段名，并重点阅读字段附近的：
+
+   - 赋值来源
+   - 校验条件
+   - 常量定义
+   - 条件分支
+   - 字典或配置项
+   - 关联查询
+   - 业务注释
+
+   这些内容用于确认字段表达的业务事实、关联对象、取值范围及适用边界。
+
+5. 精确名称没有结果时，才搜索有资料依据的完整名称、去前缀名称或同义词。不要先进行宽泛的概念搜索。
+
+6. 仅在核对外键关系、业务边界或统一命名确有必要时读取同域其他表，不要遍历整个域。
+
+7. 完成业务证据检索后，读取一个 `Teleco_Context` entity-class 样例校准格式和描述粒度，然后停止在该目录继续查找。
+
+8. 已有证据能够支持结论时，应结束相关检索，避免围绕相同关键词或目录重复搜索。
+
+## 当前任务上下文
 
 Schema Atlas 后台数据集：
+
 {{dataset_context}}
 
 本地参考资料：
+
 {{reference_paths}}
 
-参考资料用途：
-- DB、RB、WEB 等目录用于确认实体、字段、取值、约束和上下游对象的业务含义。
-- Teleco_Context 及其他已标注 Ontology JSON 用于确认本体命名、双语描述粒度、aliases、布尔标志与 enum_ref 的表达方式。
-- 同名字段不能直接假定同义，必须结合所在表、外键方向、备注和实际使用场景判断。
-- 资料之间冲突时保留证据并进入待澄清，不要自行选择一个结论。
-
 已有人工澄清：
+
 {{clarifications}}
 
 本轮人工要求：
+
 {{user_message}}
 
-生成规则：
-1. 只能标注 input-table.json 中存在的表和字段，不能创造数据库列。原始 JSON、关系索引和参考资料均为只读。
-2. className 使用完整、自然、通用的英文 PascalCase 业务概念。优先复用资料中已经存在的本体类名；不要直接沿用 ACCT、PNT、INST 等数据库缩写，例如有明确账户语义时应使用 Account，而不是 Acct。
-3. classDescription 必须使用以下格式，并同时提供充分的中英文业务语义：
-   中文描述：说明实体是什么、代表哪个业务对象、承担哪些业务职责、与关键上下游对象的关系及适用边界。应形成完整段落，不能只写“用于记录……”的一句话。
+## 类标注要求
 
-   English Description: Provide an equivalent English business-semantic description with the same scope and level of detail.
-4. classAliases 必须提供 4–12 个有用且不重复的中英文别名，覆盖正式名称、常用业务称呼和可靠同义词。不得只把 tableName 或 className 改写大小写充数。
-5. entityColumn 使用英文 camelCase，保持一表一类、类内属性名唯一，并优先复用已有本体中的属性名。
-6. 每个纳入导出的字段都必须填写 detailedDescription，格式与类描述一致：以“中文描述：”开头，再以“English Description:”提供等价英文。内容应说明字段所表达的业务事实、所属对象、作用范围、与其他业务概念的关系以及资料能够证明的约束；不要描述数据库类型、代码读写、SQL 查询、序列器、接口或程序执行过程。
-7. 每个纳入导出的字段都必须提供 2–8 个不重复的 aliases，至少包含自然英文名称和中文业务名称；有可靠资料时补充常用称呼、全称或同义词。别名不能包含未经证实的新业务含义。
-8. isLocalId 仅在字段构成本类实例的局部身份键时设为 true；isCode 仅在字段本身表达业务编码时设为 true；isDisplayName 和 isSemantic 也必须依据资料判断。false 不会导出到最终 JSON。
-9. 枚举识别不能只看字段名。对于 TYPE、CLASS、STATUS、STATE、MODE、LEVEL、CATEGORY、FLAG、CODE 等候选字段，先搜索已有 entity-classes 中的 enum_ref，再查找对应 enums JSON 或原始备注的明确取值。确认后填写 enumRef；若资料没有既有 enum_name，默认使用 entityColumn 首字母大写的名称（例如 accountClass → AccountClass）。enumDescription 必填；enumValues 至少一项；每项的 value、aliases 和 description 都必填。description 是一个同时包含中文与等价英文业务含义的字符串，不要另造 description_en 或 descriptionEn。最终实体属性只引用 enum_ref，枚举定义单独导出。外键 ID、自由文本和没有有限取值证据的字段不得标成枚举。
-10. included 表示字段是否进入 Ontology 和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，无需修改。
-11. 每个字段都必须填写 analysisSummary，作为人工审核时直接阅读的“AI 标注分析”。使用 3–6 句清晰中文，说明：AI 如何理解该字段代表的业务事实；为什么采用当前 entityColumn 和 aliases；为什么开启或关闭各布尔标志；是否以及为什么识别为枚举；存在外键时它连接的业务对象与方向；仍有何不确定性或适用边界。只写可核验的业务推理，不要重复 detailedDescription，不要写代码、SQL 或程序流程，也不要把无法确认的推测写成事实。
-12. reason 与 analysisSummary 分工不同：reason 只需简要列明本次判断所依据的具体文件、字段 remark、关系或其他业务证据，方便人工回查来源；不要在 reason 中重复完整分析。
-13. 遇到含义不明确的概念，必须先检查当前表、原始 remark、直接关联表、关系索引、同域表、现有草稿和全部已配置参考路径。只有仍无明确依据或证据冲突时才能加入 todos。每条 todo 的 checkedSources 必须列出实际检查过的文件或线索，reason 说明缺失或冲突，并尽量给出候选答案。不能因为存在待澄清项就在必填的类名、描述或 aliases 中写空值；应基于已确认资料先给出可审核草稿，并用 todo 标明仍需人工确认的边界。
-14. reply 用简洁中文汇总完成情况、识别出的枚举和仍需人工处理的事项。最终结果必须严格符合指定 JSON Schema。
+### className
+
+使用完整、自然、通用的英文 PascalCase 业务概念。
+
+优先复用当前业务资料中已经明确存在的本体类名。不要直接使用 `ACCT`、`PNT`、`INST` 等数据库缩写。例如资料明确表达“账户”时，应使用 `Account`，而不是 `Acct`。
+
+### classDescription
+
+必须提供含义等价、信息范围一致的中英文业务描述，格式如下：
+
+中文描述：说明该实体是什么、代表哪个业务对象、承担哪些业务职责、与关键上下游对象的关系，以及适用边界。
+
+English Description: Provide an equivalent English business-semantic description with the same scope and level of detail.
+
+描述应形成完整段落，不能只写“用于记录……”的一句话。
+
+### classAliases
+
+提供 4–12 个有意义且不重复的中英文别名，覆盖：
+
+- 正式业务名称
+- 常用业务称呼
+- 有证据支持的同义词
+
+不得通过改变 `tableName` 或 `className` 的大小写来凑数，也不能从格式样例复制无关别名。
+
+## 字段标注要求
+
+### entityColumn
+
+使用英文 camelCase，类内属性名必须唯一。
+
+名称应表达字段的实际业务含义。当前业务域已有一致命名，并且能够被资料确认时，优先复用该命名。
+
+### detailedDescription
+
+每个字段都必须提供含义等价的中英文详细描述：
+
+中文描述：说明字段表达的业务事实、所属对象、作用范围、与其他业务概念的关系，以及资料能够证明的业务限制。
+
+English Description: Provide an equivalent English business-semantic description with the same scope and level of detail.
+
+不得描述数据库类型、字段读写、SQL 查询、序列器、接口或程序执行过程。
+
+### aliases
+
+每个字段提供 2–8 个不重复的别名，至少包含：
+
+- 一个自然英文名称
+- 一个中文业务名称
+
+只有存在可靠依据时才能增加业务全称、常用称呼或同义词，不得扩展未经证实的业务含义。
+
+### included 与数据类型
+
+`included` 表示字段是否进入 Ontology 和 RDB Mapping。
+
+只能处理 `input-table.json` 中存在的字段，不能创造数据库列。字段的数据类型由 Schema Atlas 根据原始数据库类型转换，Claude 不负责修改。
+
+### 人工标志
+
+以下字段只允许人工设置：
+
+- `isLocalId`
+- `isCode`
+- `isDisplayName`
+- `isSemantic`
+
+处理规则：
+
+- 不根据字段名、主键、外键或代码自行判断
+- 不提出推荐值
+- 不修改已有人工设置
+- 没有人工设置时保持默认状态
+
+## 枚举识别
+
+是否属于枚举，只能根据原始 JSON 和当前业务代码中的实际证据判断，不能通过字段名称、前缀或后缀推测。
+
+按以下顺序检查：
+
+1. 字段 `description` 或 `remark` 是否明确列出有限取值及各取值的含义。
+2. RB、WEB、DB 中是否存在与该字段直接相关的常量集合、字典配置、固定赋值、校验规则或条件分支。
+3. 当前业务域已有 Ontology 中是否存在语义和取值均一致的 `enum_ref` 及枚举文件。
+
+只有能够确认有限取值集合及其业务含义时，才能设置 `enumRef`。
+
+外键标识、自由文本、普通业务编码以及没有有限取值证据的字段不得标记为枚举。
+
+确认枚举后：
+
+- 优先复用当前业务域中语义和取值一致的 `enum_name`
+- 没有可复用名称时，使用 `entityColumn` 首字母大写后的名称，例如 `accountClass` 对应 `AccountClass`
+- `enumDescription` 必须包含完整的中英文业务说明
+- `enumValues` 至少包含一项
+- 每个枚举值的 `value`、`aliases` 和 `description` 都必须填写
+- `description` 使用一个同时包含中文和等价英文含义的字符串
+- 不得创建 `description_en` 或 `descriptionEn`
+- 实体属性只保留 `enum_ref`，完整枚举定义单独导出
+
+如果资料只能证明该字段可能存在固定取值，但无法确认完整取值集合或各值含义，则加入待澄清，不得生成不完整枚举。
+
+## 字段分析与证据
+
+每个字段必须填写 `analysisSummary`，使用 3–6 句中文说明：
+
+- 对字段业务含义的理解
+- `entityColumn` 的命名依据
+- aliases 的选择依据
+- 字段是否具有外键语义
+- 是否发现枚举证据
+- 当前存在的不确定性
+
+不要在分析中替人工判断 `isLocalId`、`isCode`、`isDisplayName` 或 `isSemantic`。
+
+`reason` 只填写能够回查的具体证据，例如：
+
+- 文件路径
+- 表名或字段名的命中位置
+- 相关常量或配置
+- 外键字段映射
+- 原始 `remark` 中的取值说明
+
+如果提到 `Teleco_Context`，只能将其标记为格式参考，不能用它证明当前字段的业务含义。
+
+## 待澄清事项
+
+只有完成以下检查后仍然无法确认，才可以创建 `todos`：
+
+- 当前表描述和字段备注
+- 直接关联表及关系索引
+- 必要的同域表
+- `current-draft.json`
+- RB、WEB、DB 中的精确表名和字段名
+- 已配置的其他业务参考路径
+
+每条 todo 必须包含：
+
+- 需要人工确认的问题
+- `checkedSources`：实际检查过的文件或线索
+- `reason`：缺少什么证据，或者哪些资料存在冲突
+- 能够提出的候选答案
+
+存在待澄清事项时，仍需根据已经确认的证据生成可审核草稿，不得将必填名称、描述或 aliases 留空。
+
+## 最终输出
+
+`reply` 使用简洁中文汇总：
+
+- 已完成的标注
+- 使用的主要业务证据
+- 已确认的枚举
+- 需要人工处理的问题
+
+最终结果必须严格符合指定 JSON Schema。

@@ -53,6 +53,15 @@ test("centers review queues without moving the left-aligned workbench tabs", asy
   assert.match(css, /\.ai-review-list, \.ai-todo-list[^\n]+margin-inline:\s*auto\s*!important/);
 });
 
+test("keeps application text at a readable explicit size", async () => {
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+  const fontSizes = [...css.matchAll(/font-size:\s*([0-9.]+)px/g)].map((match) => Number(match[1]));
+
+  assert.ok(fontSizes.length > 0);
+  assert.ok(Math.min(...fontSizes) >= 10);
+  assert.match(css, /\.field-name code[^\n]+font-size:\s*15px/);
+});
+
 test("keeps portaled Select menus above the full-screen AI workbench", async () => {
   const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
 

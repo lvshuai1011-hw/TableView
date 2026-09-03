@@ -69,16 +69,16 @@ exit
 
 1. 界面导入或修改表后，完整数据集会自动同步到 `.schema-atlas-ai/datasets/`；“AI 标注 → 批量生成 → 生成配置”可查看落盘状态。
 2. 启动单表或批量任务时，系统再次确认快照最新，然后为每张表创建独立 Claude Code Session。
-3. Claude Code 先读取当前表、双向关系、所有已导入的直接关联表和相关同域表，再检查用户配置的本地代码仓库、历史标注 JSON 等资料。
+3. Claude Code 先读取当前表、双向关系和直接关联表，再以表名、字段名精确检索 RB、WEB、DB 中的代码、SQL、配置和常量；同域表按需读取，避免无目的遍历。
 4. 检索后仍无明确依据或发现冲突的概念才进入人工 TODO，并显示“已检索”来源；低置信度本身不会直接产生 TODO。
-5. 在表详情点击“AI 审核此表”进入全屏双栏标注台：左侧保留原 Session 对话，右侧按类和字段审核结构化草稿。物理字段与本体属性使用“对应”关系明确标注，不使用可能被误解为修改操作的箭头；字段的中文和英文业务描述分区展示、分开编辑，保存及导出时仍按目标 JSON 的单个 `description` 字段合并。每个字段还单独展示“AI 标注分析”和“证据依据”：前者解释业务理解、命名、别名、开关、枚举、外键语义与不确定性，后者列出可回查的资料来源。可从任一类或字段把修订要求带入左侧继续对话，也可直接“人工编辑”；人工修改先持久化到当前 Session 草稿，点击“应用到当前表”后才写入正式标注和表级变更记录。在 `Sessions` 中选中历史会话后也可直接继续对话。“生成第一版”的默认单表要求只在新建 Session 时预填，进入审核或续聊时输入框保持空白。
+5. 在表详情点击“AI 审核此表”进入全屏双栏标注台：左侧保留原 Session 对话，右侧按类和字段审核结构化草稿。物理字段与本体属性使用“对应”关系明确标注，不使用可能被误解为修改操作的箭头；字段的中文和英文业务描述分区展示、分开编辑，保存及导出时仍按目标 JSON 的单个 `description` 字段合并。每个字段还单独展示“AI 标注分析”和“证据依据”：前者解释业务理解、命名、别名、枚举证据、外键语义与不确定性，后者列出可回查的资料来源。`is_local_id`、`is_code`、`is_display_name` 和 `is_semantic` 只允许人工设置，服务端会忽略 Claude 对这些值的修改。可从任一类或字段把修订要求带入左侧继续对话，也可直接“人工编辑”；人工修改先持久化到当前 Session 草稿，点击“应用到当前表”后才写入正式标注和表级变更记录。在 `Sessions` 中选中历史会话后也可直接继续对话。“生成第一版”的默认单表要求只在新建 Session 时预填，进入审核或续聊时输入框保持空白。
 6. 人工确认并应用后，正式标注才会变化，同时写入该表自己的变更记录。
 
 Session 由 Schema Atlas 生成 UUID 并登记，前端不会混入用户在其他目录手工创建的 Claude Code 会话。继续对话时复用同一个 Session ID，并通过 Claude Code `--resume` 保留此前上下文、草稿和澄清结果，不会悄悄新建会话。每个 Session 绑定一个内容哈希数据集版本，保证后续可以确认当时参考了哪些表。服务器只把落盘数据集和允许根目录中的路径传给 `--add-dir`，不建立向量索引。
 
 ### 提示词配置
 
-默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。“AI 标注 → 批量生成”的“生成配置”会把完整模板、本地资料路径和连接状态放在同一工作面；模板可直接编辑、自动保存在当前浏览器，也可一键恢复默认。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。逐字段 AI 标注分析只保存在 Session 审核草稿中，不会增加或污染最终导出的 Ontology 与 RDB Mapping JSON 字段。
+默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。“AI 标注 → 批量生成”的“生成配置”会把完整模板、本地资料路径和连接状态放在同一工作面；模板可直接编辑、自动保存在当前浏览器，也可一键恢复默认。默认检索顺序是原始 JSON 与关系、RB/WEB/DB 中的精确表名和字段名、必要的同域资料；Teleco_Context 每个任务只读取一个 entity-class 样例，必要时再读取一个 enum 样例，且只用于输出格式与标注粒度。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。逐字段 AI 标注分析只保存在 Session 审核草稿中，不会增加或污染最终导出的 Ontology 与 RDB Mapping JSON 字段。
 
 可用占位符：`{{table_name}}`、`{{mode}}`、`{{dataset_context}}`、`{{reference_paths}}`、`{{clarifications}}`、`{{user_message}}`。其中 `{{dataset_context}}` 会展开为数据集、关系索引、当前表和直接关联表的真实落盘路径。页面会阻止包含未知占位符的任务；批量任务要求和单表对话内容通过 `{{user_message}}` 注入。
 

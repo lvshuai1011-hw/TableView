@@ -101,13 +101,67 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /\/srv\/reference\/repo/);
   assert.match(prompt, /人工回答：是/);
   assert.match(prompt, /不能创造数据库列/);
-  assert.match(prompt, /仍无明确依据/);
+  assert.match(prompt, /仍然无法确认/);
   assert.match(prompt, /checkedSources/);
   assert.match(prompt, /PE_FREE_UNIT_TYPE\.json/);
-  assert.match(prompt, /classAliases 必须提供 4–12 个/);
+  assert.match(prompt, /提供 4–12 个/);
   assert.match(prompt, /enum_ref/);
   assert.match(prompt, /analysisSummary/);
   assert.match(prompt, /English Description/);
+  assert.match(prompt, /RB、WEB、DB 中精确搜索当前 `tableName`/);
+  assert.match(prompt, /每个任务最多读取 `Teleco_Context` 中一个/);
+  assert.match(prompt, /不能通过字段名称、前缀或后缀推测/);
+  assert.match(prompt, /均由人工标注/);
+  assert.doesNotMatch(prompt, /TYPE、CLASS、STATUS/);
+});
+
+test("keeps human-only flags unchanged in Claude output and accepts them in manual review", () => {
+  const annotatedTable = {
+    ...table,
+    columns: table.columns.map((column, index) => ({
+      ...column,
+      annotation: {
+        ...column.annotation,
+        isLocalId: index === 0,
+        isCode: false,
+        isDisplayName: false,
+        isSemantic: false,
+      },
+    })),
+  };
+  const claudeDraft = {
+    draft: {
+      columns: annotatedTable.columns.map((column) => ({
+        name: column.name,
+        isLocalId: false,
+        isCode: true,
+        isDisplayName: true,
+        isSemantic: true,
+      })),
+    },
+    todos: [],
+  };
+
+  const normalizedClaude = normalizeStructuredOutput(
+    claudeDraft,
+    annotatedTable,
+    "22222222-2222-4222-8222-222222222222",
+  );
+  assert.equal(normalizedClaude.draft.columns[0].isLocalId, true);
+  assert.equal(normalizedClaude.draft.columns[0].isCode, false);
+  assert.equal(normalizedClaude.draft.columns[0].isDisplayName, false);
+  assert.equal(normalizedClaude.draft.columns[0].isSemantic, false);
+
+  const normalizedManual = normalizeStructuredOutput(
+    claudeDraft,
+    annotatedTable,
+    "33333333-3333-4333-8333-333333333333",
+    { allowManualFlags: true },
+  );
+  assert.equal(normalizedManual.draft.columns[0].isLocalId, false);
+  assert.equal(normalizedManual.draft.columns[0].isCode, true);
+  assert.equal(normalizedManual.draft.columns[0].isDisplayName, true);
+  assert.equal(normalizedManual.draft.columns[0].isSemantic, true);
 });
 
 test("renders an editable prompt template and rejects unknown placeholders", () => {
@@ -266,7 +320,7 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(completed.session.source, "schema-atlas");
     assert.equal(completed.session.datasetId, dataset.id);
     assert.equal(completed.session.draft.className, "FreeUnitInstance");
-    assert.equal(completed.session.draft.columns[0].isLocalId, true);
+    assert.equal(completed.session.draft.columns[0].isLocalId, false);
     assert.match(completed.session.draft.columns[0].analysisSummary, /主键/);
     const sessions = await (await fetch(`${origin}/api/ai/sessions`)).json();
     assert.equal(sessions.sessions.length, 1);
@@ -306,7 +360,7 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
       ...continued.session.draft,
       className: "FreeUnitInstanceReviewed",
       columns: continued.session.draft.columns.map((column) => column.name === "FREE_UNIT_ID"
-        ? { ...column, entityColumn: "reviewedFreeUnitInstanceID" }
+        ? { ...column, entityColumn: "reviewedFreeUnitInstanceID", isLocalId: true }
         : column),
     };
     const manualReviewResponse = await fetch(`${origin}/api/ai/sessions/${completed.session.id}/draft`, {
@@ -320,6 +374,7 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(manualReview.session.turnCount, 2);
     assert.equal(manualReview.session.draft.className, "FreeUnitInstanceReviewed");
     assert.equal(manualReview.session.draft.columns[0].entityColumn, "reviewedFreeUnitInstanceID");
+    assert.equal(manualReview.session.draft.columns[0].isLocalId, true);
     assert.equal(manualReview.session.draft.columns[0].analysisSummary, continued.session.draft.columns[0].analysisSummary);
     assert.match(manualReview.session.messages.at(-1).content, /人工修改了类与 FREE_UNIT_ID/);
     assert.equal(manualReview.session.trace.length, 10);

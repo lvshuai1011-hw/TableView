@@ -108,8 +108,7 @@ export const annotationOutputSchema = {
             }],
             required: [
               "name", "included", "entityColumn", "aliases", "detailedDescription",
-              "isLocalId", "isDisplayName", "isSemantic", "isCode", "enumValues", "enumRef",
-              "enumDescription", "confidence", "analysisSummary", "reason",
+              "enumValues", "enumRef", "enumDescription", "confidence", "analysisSummary", "reason",
             ],
             properties: {
               name: { type: "string" },
@@ -168,7 +167,7 @@ export const annotationOutputSchema = {
   },
 };
 
-function normalizeColumnDraft(value, column) {
+function normalizeColumnDraft(value, column, { allowManualFlags = false } = {}) {
   const fallback = currentAnnotation(column);
   const source = value && typeof value === "object" ? value : {};
   return {
@@ -177,10 +176,10 @@ function normalizeColumnDraft(value, column) {
     entityColumn: stringValue(source.entityColumn, fallback.entityColumn),
     aliases: stringArray(source.aliases),
     detailedDescription: stringValue(source.detailedDescription, fallback.detailedDescription),
-    isLocalId: boolValue(source.isLocalId, fallback.isLocalId),
-    isDisplayName: boolValue(source.isDisplayName, fallback.isDisplayName),
-    isSemantic: boolValue(source.isSemantic, fallback.isSemantic),
-    isCode: boolValue(source.isCode, fallback.isCode),
+    isLocalId: allowManualFlags ? boolValue(source.isLocalId, fallback.isLocalId) : fallback.isLocalId,
+    isDisplayName: allowManualFlags ? boolValue(source.isDisplayName, fallback.isDisplayName) : fallback.isDisplayName,
+    isSemantic: allowManualFlags ? boolValue(source.isSemantic, fallback.isSemantic) : fallback.isSemantic,
+    isCode: allowManualFlags ? boolValue(source.isCode, fallback.isCode) : fallback.isCode,
     enumValues: normalizeEnumValues(source.enumValues),
     enumRef: stringValue(source.enumRef, fallback.enumRef),
     enumDescription: stringValue(source.enumDescription, fallback.enumDescription),
@@ -213,7 +212,7 @@ function normalizeTodo(value, tableName, sessionId) {
   };
 }
 
-export function normalizeStructuredOutput(value, table, sessionId) {
+export function normalizeStructuredOutput(value, table, sessionId, options = {}) {
   const source = value && typeof value === "object" ? value : {};
   const rawDraft = source.draft && typeof source.draft === "object" ? source.draft : {};
   const rawColumns = new Map(
@@ -222,7 +221,7 @@ export function normalizeStructuredOutput(value, table, sessionId) {
       .map((column) => [stringValue(column.name).toUpperCase(), column]),
   );
   const columns = (Array.isArray(table.columns) ? table.columns : []).map((column) =>
-    normalizeColumnDraft(rawColumns.get(String(column.name).toUpperCase()), column));
+    normalizeColumnDraft(rawColumns.get(String(column.name).toUpperCase()), column, options));
   const seenNames = new Map();
   const duplicateTodos = [];
   columns.forEach((column) => {
