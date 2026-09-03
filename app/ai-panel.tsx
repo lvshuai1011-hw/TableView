@@ -54,6 +54,7 @@ import DEFAULT_BATCH_INSTRUCTION_TEXT from "../config/default-batch-instruction.
 import DEFAULT_TABLE_INSTRUCTION_TEXT from "../config/default-table-instruction.txt?raw";
 import { mergeAiDraftIntoTable, summarizeAiDraft } from "./ai-utils";
 import type { ColumnAnnotation, SchemaTable } from "./data";
+import { splitBilingualDescription } from "./description-utils";
 import { FieldEditorDialog, TableConfigDialog } from "./editor-dialogs";
 import { validateExportConfiguration } from "./schema-utils";
 import type {
@@ -699,9 +700,13 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
                     {draftValidationErrors.length > 0 && <div className="ai-draft-validation" role="alert"><CircleAlert size={15} /><div><strong>草稿还有必填项未完成</strong><span>{draftValidationErrors.slice(0, 4).join("；")}{draftValidationErrors.length > 4 ? `；另有 ${draftValidationErrors.length - 4} 项` : ""}</span></div></div>}
                     <div className="ai-draft-fields"><div>{activeConversationSession.draft.columns.map((column) => {
                       const fieldTodos = currentTodos.filter((todo) => todo.scope === "field" && todo.fieldName === column.name);
+                      const description = splitBilingualDescription(column.detailedDescription);
                       return <article key={column.name}>
-                        <div className="ai-draft-review-heading"><div><code>{column.name}</code><strong>→</strong><code>{column.entityColumn}</code><Badge variant="outline" className={`confidence-${column.confidence}`}>{column.confidence === "high" ? "高" : column.confidence === "low" ? "低" : "中"}</Badge></div><div><button type="button" onClick={() => prepareClaudeRevision(column.name)}><MessageSquareText size={12} />AI 修订</button><button type="button" onClick={() => setDraftFieldEditorName(column.name)} disabled={draftSaving}><FilePenLine size={12} />人工编辑</button></div></div>
-                        <p>{column.detailedDescription || "暂无详细描述"}</p>
+                        <div className="ai-draft-review-heading"><div className="ai-field-mapping"><span>物理字段</span><code>{column.name}</code><span>对应本体属性</span><code>{column.entityColumn}</code><Badge variant="outline" className={`confidence-${column.confidence}`}>{column.confidence === "high" ? "高" : column.confidence === "low" ? "低" : "中"}</Badge></div><div><button type="button" onClick={() => prepareClaudeRevision(column.name)}><MessageSquareText size={12} />AI 修订</button><button type="button" onClick={() => setDraftFieldEditorName(column.name)} disabled={draftSaving}><FilePenLine size={12} />人工编辑</button></div></div>
+                        <section className="ai-field-descriptions">
+                          <div><span>中文业务描述</span><p>{description.chinese}</p></div>
+                          <div><span>English Description</span><p>{description.english}</p></div>
+                        </section>
                         <div className="ai-draft-flags">{!column.included && <span>不导出</span>}{column.isLocalId && <span>LOCAL ID</span>}{column.isCode && <span>CODE</span>}{column.isDisplayName && <span>DISPLAY NAME</span>}{column.isSemantic && <span>SEMANTIC</span>}{column.enumRef && <span>ENUM · {column.enumRef}</span>}{column.aliases.map((alias) => <span key={alias}>{alias}</span>)}</div>
                         <section className="ai-field-analysis">
                           <div><Sparkles size={13} /><strong>AI 标注分析</strong></div>

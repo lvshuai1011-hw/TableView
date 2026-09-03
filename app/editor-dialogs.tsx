@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
 import { Column, ColumnAnnotation, EnumValue, SchemaTable } from "./data";
+import { joinBilingualDescription, splitBilingualDescription } from "./description-utils";
 import { ChangeRecord, isChangeRestorable, migrateColumn, normalizeExportType } from "./schema-utils";
 
 function parseList(value: string) {
@@ -44,6 +45,7 @@ function FieldEditorForm({
 }) {
   const [draft, setDraft] = useState<ColumnAnnotation>(() => migrateColumn(column).annotation!);
   const [aliasesText, setAliasesText] = useState(() => draft.aliases.join("，"));
+  const [descriptionParts, setDescriptionParts] = useState(() => splitBilingualDescription(draft.detailedDescription));
   const [enumAliasTexts, setEnumAliasTexts] = useState(() => draft.enumValues.map((item) => item.aliases.join("，")));
   const [enumEnabled, setEnumEnabled] = useState(() => Boolean(draft.enumRef || draft.enumDescription || draft.enumValues.length));
   const update = <K extends keyof ColumnAnnotation>(key: K, value: ColumnAnnotation[K]) => setDraft((current) => ({ ...current, [key]: value }));
@@ -87,7 +89,8 @@ function FieldEditorForm({
   const missingRequired = draft.included ? [
     !draft.entityColumn.trim() ? "属性名" : "",
     parsedAliases.length === 0 ? "字段别名" : "",
-    !draft.detailedDescription.trim() ? "中英文业务语义说明" : "",
+    !descriptionParts.chinese.trim() ? "中文业务描述" : "",
+    !descriptionParts.english.trim() ? "英文业务描述" : "",
     enumEnabled && !draft.enumRef.trim() ? "枚举名称" : "",
     enumEnabled && !draft.enumDescription.trim() ? "枚举说明" : "",
     enumEnabled && parsedEnumValues.length === 0 ? "枚举值" : "",
@@ -123,7 +126,10 @@ function FieldEditorForm({
           <label><span>属性名 attr_name <b>*</b></span><Input value={draft.entityColumn} onChange={(event) => onEntityColumnChange(event.target.value)} /></label>
           <label><span>字段别名 aliases（逗号或换行分隔）<b>*</b></span><Input value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} /></label>
         </div>
-        <label><span>中英文业务语义描述 description <b>*</b></span><Textarea value={draft.detailedDescription} onChange={(event) => update("detailedDescription", event.target.value)} /></label>
+        <div className="editor-grid bilingual-description-editor">
+          <label><span>中文业务描述 <b>*</b></span><Textarea value={descriptionParts.chinese} onChange={(event) => setDescriptionParts((current) => ({ ...current, chinese: event.target.value }))} rows={5} /></label>
+          <label><span>English Description <b>*</b></span><Textarea value={descriptionParts.english} onChange={(event) => setDescriptionParts((current) => ({ ...current, english: event.target.value }))} rows={5} /></label>
+        </div>
         <div className="editor-boolean-grid">
           <label><Switch checked={draft.isLocalId} onCheckedChange={(checked) => update("isLocalId", checked)} /><span><strong>is_local_id</strong><small>false 时不导出</small></span></label>
           <label><Switch checked={draft.isDisplayName} onCheckedChange={(checked) => update("isDisplayName", checked)} /><span><strong>is_display_name</strong><small>作为对象显示名称</small></span></label>
@@ -156,7 +162,7 @@ function FieldEditorForm({
     </div>
     <DialogFooter className="editor-footer">
       {onDelete && <Button variant="outline" className="editor-delete" onClick={onDelete}><Trash2 size={14} />删除字段</Button>}
-      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parsedAliases, detailedDescription: draft.detailedDescription.trim(), enumRef: enumEnabled ? draft.enumRef.trim() : "", enumDescription: enumEnabled ? draft.enumDescription.trim() : "", enumValues: enumEnabled ? parsedEnumValues : [] })}>保存标注</Button></div>
+      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parsedAliases, detailedDescription: joinBilingualDescription(descriptionParts), enumRef: enumEnabled ? draft.enumRef.trim() : "", enumDescription: enumEnabled ? draft.enumDescription.trim() : "", enumValues: enumEnabled ? parsedEnumValues : [] })}>保存标注</Button></div>
     </DialogFooter>
   </DialogContent>;
 }

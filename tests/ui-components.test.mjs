@@ -342,6 +342,16 @@ test("applies an AI draft without mutating the imported table structure", async 
   assert.deepEqual(merged.columns.map((column) => column.name), source.columns.map((column) => column.name));
 });
 
+test("splits bilingual field descriptions for review and rejoins the export value", async () => {
+  const { joinBilingualDescription, splitBilingualDescription } = await vite.ssrLoadModule("/app/description-utils.ts");
+  const source = "中文描述：修改时间表示业务记录最近一次发生有效变更的时间。\n\nEnglish Description: The modification time represents when the business record was last validly changed.";
+  const parts = splitBilingualDescription(source);
+  assert.equal(parts.chinese, "修改时间表示业务记录最近一次发生有效变更的时间。");
+  assert.match(parts.english, /business record/);
+  assert.equal(joinBilingualDescription(parts), source);
+  assert.deepEqual(splitBilingualDescription("只有中文说明"), { chinese: "只有中文说明", english: "" });
+});
+
 test("keeps history accessible only through each affected table", async () => {
   const {
     appendChangeRecords,

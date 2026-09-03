@@ -696,6 +696,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-draft-review-heading button:not([data-slot="button"]) { display: flex; align-items: center; gap: 4px; padding: 4px 6px; color: #52736f; background: transparent; border: 0; border-radius: 5px; font-size: 10px; white-space: nowrap; }
 .ai-draft-review-heading button:not([data-slot="button"]):hover { color: #176f68; background: #e9f4f2; }
 .ai-draft-review-heading button:disabled { opacity: .45; }
+.ai-field-mapping { flex-wrap: wrap; }
+.ai-field-mapping > span { white-space: nowrap; }
 .ai-draft-validation { display: flex; align-items: flex-start; gap: 8px; padding: 10px 11px; color: #965823; background: #fff6e7; border: 1px solid #ecd4ae; border-radius: 8px; }
 .ai-draft-validation > div { display: grid; gap: 3px; }
 .ai-draft-validation strong { font-size: 11px; }
@@ -710,6 +712,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-draft-fields article > div:first-child [data-slot="badge"] { margin-left: auto; font-size: 9px; }
 .ai-draft-fields article p { margin: 0; color: #617587; font-size: 12px; line-height: 1.55; }
 .ai-draft-fields article > small { color: #8b98a4; font-size: 10px; }
+.ai-field-descriptions { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; background: #fafcfc; border: 1px solid #e2e9ea; border-radius: 7px; }
+.ai-field-descriptions > div { display: grid; align-content: start; gap: 6px; padding: 10px 11px; }
+.ai-field-descriptions > div + div { border-left: 1px solid #e2e9ea; }
+.ai-field-descriptions span { color: #52716f; font-size: 10px; font-weight: 700; }
+.ai-field-descriptions p { color: #566e80 !important; white-space: pre-wrap; }
 .ai-field-analysis { display: grid; gap: 6px; padding: 10px 11px; color: #465f72; background: #f3f8fb; border: 1px solid #dce8ee; border-radius: 7px; }
 .ai-field-analysis > div { display: flex; align-items: center; gap: 6px; color: #32627b; }
 .ai-field-analysis > div strong { font-size: 11px; }
@@ -929,6 +936,8 @@ body:has(.ai-workbench-page) [data-slot="dialog-content"], body:has(.ai-workbenc
   .ai-review-pane { min-height: 520px; }
   .ai-draft-review-heading { align-items: flex-start; flex-direction: column; }
   .ai-draft-review-heading > div:last-child { width: 100%; }
+  .ai-field-descriptions { grid-template-columns: 1fr; }
+  .ai-field-descriptions > div + div { border-top: 1px solid #e2e9ea; border-left: 0; }
   .ai-draft-apply { align-items: stretch; flex-direction: column; }
   .ai-draft-stats { grid-template-columns: 1fr; }
   .ai-draft-stats > div { border-right: 0; border-bottom: 1px solid #e2e9ea; }
