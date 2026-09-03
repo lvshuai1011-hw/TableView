@@ -835,6 +835,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-session-table-missing svg { flex: 0 0 auto; margin-top: 1px; }
 body:has(.ai-workbench-page) [data-slot="dialog-overlay"], body:has(.ai-workbench-page) [data-slot="alert-dialog-overlay"] { z-index: 80; }
 body:has(.ai-workbench-page) [data-slot="dialog-content"], body:has(.ai-workbench-page) [data-slot="alert-dialog-content"] { z-index: 81; }
+body:has(.ai-workbench-page) [data-slot="select-content"] { z-index: 82; }
 .ai-list-heading { padding: 3px 4px 11px; }
 .ai-list-heading > div { display: grid; gap: 2px; }
 .ai-list-heading strong { color: #40586b; font-size: 13px; }

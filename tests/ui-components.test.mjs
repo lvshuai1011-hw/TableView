@@ -53,6 +53,12 @@ test("centers review queues without moving the left-aligned workbench tabs", asy
   assert.match(css, /\.ai-review-list, \.ai-todo-list[^\n]+margin-inline:\s*auto\s*!important/);
 });
 
+test("keeps portaled Select menus above the full-screen AI workbench", async () => {
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+
+  assert.match(css, /body:has\(\.ai-workbench-page\) \[data-slot="select-content"\][^\n]+z-index:\s*82/);
+});
+
 test("forwards progress semantics to the primitive", async () => {
   const { Progress } = await vite.ssrLoadModule("/components/ui/progress.tsx");
   const html = renderToStaticMarkup(React.createElement(Progress, { value: 37 }));
