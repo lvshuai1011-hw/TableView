@@ -207,7 +207,7 @@ console.log(JSON.stringify({ type: "system", subtype: "init", session_id: sessio
 console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "先读取当前表与关系索引。" }, { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "dataset-context.json" } }] } }));
 console.log(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "已读取当前表与关联表清单" }] } }));
 console.log(JSON.stringify({ type: "result", is_error: false, structured_output: {
-  reply: "第一版已经生成",
+  reply: resumeFlag >= 0 ? "已在原 Session 完成第二轮修订" : "第一版已经生成",
   draft: { className: "FreeUnitInstance", classDescription: "中文描述：免费资源实例代表归属于特定业务属主、可在有效周期内用于抵扣对应通信消费的权益余额，是免费资源授予、消耗、滚存与失效管理中的核心业务对象，并通过资源类型界定可抵扣的服务范围与度量口径。\\n\\nEnglish Description: A free unit instance represents a benefit balance granted to a specific business owner and available for offsetting eligible telecommunications usage during its validity period. It is the central business object for grant, consumption, rollover, and expiry management, while its resource type defines the applicable service scope and measurement convention.", classAliases: ["Free resource instance", "Bonus resource", "免费资源实例", "赠送资源"], confidence: "high", columns: [
     { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitInstanceID", aliases: ["Free unit instance identifier", "免费资源实例标识"], detailedDescription: "中文描述：免费资源实例标识用于在免费资源业务范围内唯一识别一份已经授予某个属主的资源权益，并作为该权益在余额变化、使用抵扣、滚存衔接和生命周期追踪中的稳定关联依据。\\n\\nEnglish Description: The free unit instance identifier uniquely identifies a granted resource entitlement within the free-unit business scope and serves as the stable reference for balance changes, usage offsets, rollover continuity, and lifecycle tracking.", isLocalId: true, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "high", reason: "input-table.json 主键及 remark" },
     { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: ["Free unit type identifier", "免费资源类型标识"], detailedDescription: "中文描述：免费资源类型标识指明当前免费资源实例所属的资源类别，用于确定该权益能够抵扣的业务使用类型、对应度量口径以及适用的资源管理规则，并把实例关联到统一的类型定义。\\n\\nEnglish Description: The free unit type identifier specifies the resource category of the current free-unit instance, determining the eligible usage category, measurement convention, and applicable resource-management rules while linking the instance to a shared type definition.", isLocalId: false, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "medium", reason: "字段 remark 与父表关系" }
@@ -276,6 +276,49 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     const sessionDetail = await (await fetch(`${origin}/api/ai/sessions/${completed.session.id}`)).json();
     assert.deepEqual(sessionDetail.session.trace.map((item) => item.kind), ["system", "assistant", "tool_use", "tool_result", "result"]);
     assert.match(sessionDetail.session.trace.find((item) => item.kind === "tool_use").detail, /dataset-context\.json/);
+    const continuationResponse = await fetch(`${origin}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        table,
+        datasetId: dataset.id,
+        sessionId: completed.session.id,
+        message: "继续核对字段语义并修订",
+        referencePaths: [],
+        promptTemplate: defaultPromptTemplate,
+      }),
+    });
+    assert.equal(continuationResponse.status, 200);
+    const continuationEvents = (await continuationResponse.text()).trim().split("\n").map((line) => JSON.parse(line));
+    const continued = continuationEvents.find((event) => event.type === "completed");
+    assert.equal(continued.session.id, completed.session.id);
+    assert.equal(continued.session.turnCount, 2);
+    assert.equal(continued.session.messages.at(-1).content, "已在原 Session 完成第二轮修订");
+    const continuedSessions = await (await fetch(`${origin}/api/ai/sessions`)).json();
+    assert.equal(continuedSessions.sessions.length, 1);
+    assert.equal(continuedSessions.sessions[0].messageCount, 4);
+    const continuedDetail = await (await fetch(`${origin}/api/ai/sessions/${completed.session.id}`)).json();
+    assert.equal(continuedDetail.session.trace.length, 10);
+    const manualDraft = {
+      ...continued.session.draft,
+      className: "FreeUnitInstanceReviewed",
+      columns: continued.session.draft.columns.map((column) => column.name === "FREE_UNIT_ID"
+        ? { ...column, entityColumn: "reviewedFreeUnitInstanceID" }
+        : column),
+    };
+    const manualReviewResponse = await fetch(`${origin}/api/ai/sessions/${completed.session.id}/draft`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ table, draft: manualDraft, label: "修改了类与 FREE_UNIT_ID 的审核标注" }),
+    });
+    assert.equal(manualReviewResponse.status, 200);
+    const manualReview = await manualReviewResponse.json();
+    assert.equal(manualReview.session.id, completed.session.id);
+    assert.equal(manualReview.session.turnCount, 2);
+    assert.equal(manualReview.session.draft.className, "FreeUnitInstanceReviewed");
+    assert.equal(manualReview.session.draft.columns[0].entityColumn, "reviewedFreeUnitInstanceID");
+    assert.match(manualReview.session.messages.at(-1).content, /人工修改了类与 FREE_UNIT_ID/);
+    assert.equal(manualReview.session.trace.length, 10);
     const deleteResponse = await fetch(`${origin}/api/ai/sessions`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },

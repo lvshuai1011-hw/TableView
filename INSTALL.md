@@ -116,7 +116,7 @@ sudo setfacl -R -m u:claude:rX /data/domain-docs
 
 ### 配置生成提示词
 
-安装后在页面打开“AI 标注 → 提示词”，可查看和修改发送给 Claude Code 的完整模板。修改自动保存在当前浏览器，下一轮单表、批量或 TODO 续写任务立即使用；“恢复默认”会重新载入仓库中的 `config/default-annotation-prompt.txt`。
+安装后在页面打开“AI 标注 → 批量生成 → 生成配置”，可查看和修改发送给 Claude Code 的完整模板，并在同一区域配置本地资料路径、检查连接状态。修改自动保存在当前浏览器，下一轮单表、批量或 TODO 续写任务立即使用；“恢复默认”会重新载入仓库中的 `config/default-annotation-prompt.txt`。
 
 默认模板要求 Claude Code 先检查当前表、后台关系索引、已导入的直接关联表、相关同域表、现有草稿和配置的参考资料，再生成详细的中英文业务语义、类别名、字段别名和可核验的结构化枚举。除布尔开关及未启用的枚举外，生成 JSON 的普通信息均为必填，不能用空字符串或空别名数组占位。只有检索后仍没有明确依据或资料互相冲突时，才会创建待澄清项，并在界面列出已检索来源。
 
@@ -155,7 +155,7 @@ npm run build
 sudo systemctl restart schema-atlas
 ```
 
-`.schema-atlas-ai/` 不会被 Git 或构建覆盖，其中包含落盘数据集、关系索引、Claude Code Session 和完整对话记录。界面“AI 标注 → 资料”显示“已落盘”后，才表示当前浏览器中的全部表已成功同步到本地服务。
+`.schema-atlas-ai/` 不会被 Git 或构建覆盖，其中包含落盘数据集、关系索引、Claude Code Session 和完整对话记录。界面“AI 标注 → 批量生成 → 生成配置”显示“已落盘”后，才表示当前浏览器中的全部表已成功同步到本地服务。
 
 ## 7. 常见问题
 

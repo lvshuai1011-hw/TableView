@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
   CheckCircle2,
   CircleAlert,
   Clock3,
+  FilePenLine,
   FileText,
   FileCheck2,
   FolderSearch,
@@ -52,6 +53,8 @@ import DEFAULT_ANNOTATION_PROMPT from "../config/default-annotation-prompt.txt?r
 import DEFAULT_BATCH_INSTRUCTION_TEXT from "../config/default-batch-instruction.txt?raw";
 import DEFAULT_TABLE_INSTRUCTION_TEXT from "../config/default-table-instruction.txt?raw";
 import { mergeAiDraftIntoTable, summarizeAiDraft } from "./ai-utils";
+import type { ColumnAnnotation, SchemaTable } from "./data";
+import { FieldEditorDialog, TableConfigDialog } from "./editor-dialogs";
 import { validateExportConfiguration } from "./schema-utils";
 import type {
   AiDataset,
@@ -92,6 +95,10 @@ function statusClass(status: string) {
   if (["running", "queued", "cancelling"].includes(status)) return "is-running";
   if (status === "needs_clarification") return "is-warning";
   return "";
+}
+
+function sessionIsBusy(status?: string) {
+  return Boolean(status && ["queued", "running", "cancelling"].includes(status));
 }
 
 function shortTime(value: string) {
@@ -208,6 +215,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const [selectedSession, setSelectedSession] = useState<AiSession | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [chatMessage, setChatMessage] = useState(DEFAULT_TABLE_INSTRUCTION);
+  const [sessionMessage, setSessionMessage] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [activity, setActivity] = useState("");
   const [batchDomain, setBatchDomain] = useState("__all__");
@@ -223,12 +231,25 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [sessionDeleteOpen, setSessionDeleteOpen] = useState(false);
   const [sessionsDeleting, setSessionsDeleting] = useState(false);
+  const [draftClassEditorOpen, setDraftClassEditorOpen] = useState(false);
+  const [draftFieldEditorName, setDraftFieldEditorName] = useState<string | null>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const pendingConversationSessionId = useRef<string | null>(null);
+  const workComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const activeTable = initialTableName ? tables.find((table) => table.tableName === initialTableName) : undefined;
   const domains = useMemo(() => [...new Set(tables.map((table) => table.domain0))].sort((a, b) => a.localeCompare(b, "zh-CN")), [tables]);
   const referencePaths = useMemo(() => referenceText.split("\n").map((item) => item.trim()).filter(Boolean), [referenceText]);
   const activeJobs = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status));
   const visibleJobs = jobs.slice(0, 10);
   const tableSessions = activeTable ? sessions.filter((session) => session.tableName === activeTable.tableName) : [];
+  const activeConversationSession = activeTable && selectedSession?.tableName === activeTable.tableName ? selectedSession : null;
+  const selectedSessionTable = selectedSession ? tables.find((table) => table.tableName === selectedSession.tableName) : undefined;
+  const activeConversationBusy = sessionIsBusy(activeConversationSession?.status);
+  const selectedConversationBusy = sessionIsBusy(selectedSession?.status);
+  const reviewDraftTable = activeTable && activeConversationSession?.draft
+    ? mergeAiDraftIntoTable(activeTable, activeConversationSession.draft)
+    : undefined;
+  const reviewDraftColumn = reviewDraftTable?.columns.find((column) => column.name === draftFieldEditorName);
 
   const loadSession = useCallback(async (sessionId: string, silent = false) => {
     if (!silent) setLoadingSession(true);
@@ -326,10 +347,17 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
+      const conversationSessionId = pendingConversationSessionId.current;
+      pendingConversationSessionId.current = null;
       setTab("work");
-      setSelectedSessionId(null);
-      setSelectedSession(null);
-      setChatMessage(initialTableName ? DEFAULT_TABLE_INSTRUCTION : "");
+      if (conversationSessionId) {
+        setSelectedSessionId(conversationSessionId);
+        setChatMessage("");
+      } else {
+        setSelectedSessionId(null);
+        setSelectedSession(null);
+        setChatMessage(initialTableName ? DEFAULT_TABLE_INSTRUCTION : "");
+      }
       void refresh();
       if (datasetReady) void syncDataset().catch(() => {});
     });
@@ -352,7 +380,11 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
       : sessions[0];
     if (!candidate) return;
     let active = true;
-    queueMicrotask(() => { if (active) setSelectedSessionId(candidate.id); });
+    queueMicrotask(() => {
+      if (!active) return;
+      setSelectedSessionId(candidate.id);
+      if (initialTableName) setChatMessage("");
+    });
     return () => { active = false; };
   }, [open, initialTableName, sessions, selectedSessionId]);
 
@@ -368,25 +400,49 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
 
   const selectSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
+    setSessionMessage("");
+    if (activeTable) setChatMessage("");
     if (tab === "work" && !activeTable) setTab("sessions");
   };
 
-  const sendMessage = async () => {
-    if (!activeTable || chatBusy) return;
-    const text = chatMessage.trim();
+  const openSessionConversation = (sessionId: string, tableName: string) => {
+    if (!tables.some((table) => table.tableName === tableName)) {
+      toast.error("无法继续这个 Session", { description: `对应表 ${tableName} 已不在当前导入数据中，请先恢复或重新导入。` });
+      return;
+    }
+    pendingConversationSessionId.current = initialTableName === tableName ? null : sessionId;
+    setSelectedSessionId(sessionId);
+    setSelectedSession((current) => current?.id === sessionId ? current : null);
+    setChatMessage("");
+    onReviewTable(tableName);
+    setTab("work");
+  };
+
+  const prepareClaudeRevision = (fieldName?: string) => {
+    if (!activeTable) return;
+    const request = fieldName
+      ? `请只重新审核字段 ${activeTable.tableName}.${fieldName}。请结合导入字段资料、外键关系和已配置参考资料，修订它的 attr_name、详细中英文业务语义、aliases、布尔标志及枚举配置；不要改动无关字段。`
+      : `请只重新审核表 ${activeTable.tableName} 的类级标注。请结合已配置参考资料，修订 class_name、详细中英文业务语义和 aliases；不要改动无关字段。`;
+    setChatMessage(request);
+    queueMicrotask(() => workComposerRef.current?.focus());
+  };
+
+  const runSessionTurn = async (targetTable: SchemaTable | undefined, targetSession: AiSession | null, rawMessage: string, clearMessage: () => void) => {
+    if (!targetTable || chatBusy || sessionIsBusy(targetSession?.status)) return;
+    const text = rawMessage.trim();
     if (!text) return;
     setChatBusy(true);
-    setActivity("正在启动 Claude Code…");
+    setActivity(targetSession ? "正在恢复 Claude Code Session…" : "正在启动 Claude Code…");
     try {
       const currentDataset = await syncDataset();
-      setChatMessage("");
+      clearMessage();
       await streamChat({
-        table: activeTable,
+        table: targetTable,
         datasetId: currentDataset.id,
         message: text,
         referencePaths,
         promptTemplate,
-        sessionId: selectedSession?.tableName === activeTable.tableName ? selectedSession.id : undefined,
+        sessionId: targetSession?.tableName === targetTable.tableName ? targetSession.id : undefined,
       }, (event) => {
         if (event.label) setActivity(event.label);
         if (event.session) {
@@ -515,10 +571,46 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
       await api(`/api/ai/sessions/${selectedSession.id}/applied`, { method: "POST", body: "{}" });
       await refresh(true);
       await loadSession(selectedSession.id, true);
-      toast.success(`已应用 ${activeTable.tableName} 的 AI 草稿`, { description: "本次修改已写入该表自己的变更记录。" });
+      toast.success(`已应用 ${activeTable.tableName} 的审核草稿`, { description: "本次修改已写入该表自己的变更记录。" });
     } catch (error) {
       toast.warning("标注已应用，但 Session 状态同步失败", { description: error instanceof Error ? error.message : "可稍后重试" });
     }
+  };
+
+  const persistManualDraft = async (draft: AiSession["draft"], label: string) => {
+    if (!activeTable || !activeConversationSession || !draft || draftSaving) return false;
+    setDraftSaving(true);
+    try {
+      const value = await api<{ session: AiSession }>(`/api/ai/sessions/${activeConversationSession.id}/draft`, {
+        method: "PATCH",
+        body: JSON.stringify({ table: activeTable, draft, label }),
+      });
+      setSelectedSession(value.session);
+      await refresh(true);
+      toast.success(label, { description: "已保存到当前 Session 的审核草稿，尚未应用到正式表标注。" });
+      return true;
+    } catch (error) {
+      toast.error("人工修改保存失败", { description: error instanceof Error ? error.message : "未知错误" });
+      return false;
+    } finally {
+      setDraftSaving(false);
+    }
+  };
+
+  const saveDraftClass = async (value: { className: string; classDescription: string; classAliases: string[] }) => {
+    if (!activeConversationSession?.draft) return;
+    const saved = await persistManualDraft({ ...activeConversationSession.draft, ...value }, "修改了类级标注");
+    if (saved) setDraftClassEditorOpen(false);
+  };
+
+  const saveDraftField = async (annotation: ColumnAnnotation) => {
+    if (!activeConversationSession?.draft || !draftFieldEditorName) return;
+    const draft = activeConversationSession.draft;
+    const saved = await persistManualDraft({
+      ...draft,
+      columns: draft.columns.map((column) => column.name === draftFieldEditorName ? { ...column, ...annotation } : column),
+    }, `修改了字段 ${draftFieldEditorName} 的审核标注`);
+    if (saved) setDraftFieldEditorName(null);
   };
 
   const draftSummary = activeTable && selectedSession?.draft && selectedSession.draft.tableName === activeTable.tableName
@@ -533,6 +625,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const hasDatasetContextVariable = /\{\{\s*dataset_context\s*\}\}/.test(promptTemplate);
   const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
   const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open") ?? [];
+  const classTodos = currentTodos.filter((todo) => todo.scope !== "field");
   const openTodos = todos.filter((todo) => todo.status === "open");
   const reviewSessions = sessions.filter((session) => session.status === "draft_ready");
   const selectedSessionCount = [...selectedSessionIds].filter((id) => sessions.some((session) => session.id === id)).length;
@@ -557,39 +650,77 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
           <TabsTrigger value="review"><FileCheck2 size={14} />待审核 <span>{reviewSessions.length}</span></TabsTrigger>
           <TabsTrigger value="todos"><ListTodo size={14} />待澄清 <span>{openTodos.length}</span></TabsTrigger>
           <TabsTrigger value="sessions"><MessageSquareText size={14} />Sessions <span>{sessions.length}</span></TabsTrigger>
-          <TabsTrigger value="prompt"><FileText size={14} />提示词</TabsTrigger>
-          <TabsTrigger value="settings"><FolderSearch size={14} />资料</TabsTrigger>
         </TabsList>
 
         <TabsContent value="work" className="ai-tab-content">
           {activeTable ? <div className="ai-table-workspace">
             <div className="ai-table-context"><div><span>当前表</span><code>{activeTable.tableName}</code><small>{activeTable.className} · {activeTable.columns.length} 个字段</small></div><div className="ai-table-context-actions">{tableSessions.length > 1 && <Select value={selectedSession?.tableName === activeTable.tableName ? selectedSession.id : tableSessions[0]?.id} onValueChange={selectSession}><SelectTrigger size="sm"><SelectValue placeholder="选择会话" /></SelectTrigger><SelectContent>{tableSessions.map((session) => <SelectItem key={session.id} value={session.id}>{shortTime(session.updatedAt)} · {statusLabel(session.status)}</SelectItem>)}</SelectContent></Select>}<button type="button" onClick={() => onReviewTable(null)}>返回批量</button></div></div>
-            {selectedSession?.tableName === activeTable.tableName ? <>
-              <SessionTranscript session={{ ...selectedSession, status: chatBusy ? "running" : selectedSession.status, activities: activity ? [...selectedSession.activities, { id: "live", label: activity, at: new Date().toISOString() }] : selectedSession.activities }} />
-              {selectedSession.draft && draftSummary && <section className="ai-draft-card">
-                <div className="ai-draft-heading"><div><FileCheck2 size={16} /><span>AI 标注草稿</span></div><Badge variant="outline" className={`confidence-${selectedSession.draft.confidence}`}>{selectedSession.draft.confidence === "high" ? "高置信" : selectedSession.draft.confidence === "low" ? "低置信" : "中等置信"}</Badge></div>
-                <div className="ai-draft-stats"><div><strong>{draftSummary.changedFields}</strong><span>字段有变化</span></div><div><strong>{draftSummary.includedFields}</strong><span>字段将导出</span></div><div><strong>{draftSummary.lowConfidenceFields}</strong><span>低置信字段</span></div></div>
-                <div className="ai-draft-class"><span>类名</span><code>{activeTable.className}</code><strong>→</strong><code>{selectedSession.draft.className}</code></div>
-                <details className="ai-draft-fields">
-                  <summary>查看 {selectedSession.draft.columns.length} 个字段的标注草稿</summary>
-                  <div>{selectedSession.draft.columns.map((column) => <article key={column.name}>
-                    <div><code>{column.name}</code><strong>→</strong><code>{column.entityColumn}</code><Badge variant="outline" className={`confidence-${column.confidence}`}>{column.confidence === "high" ? "高" : column.confidence === "low" ? "低" : "中"}</Badge></div>
-                    <p>{column.detailedDescription || "暂无详细描述"}</p>
-                    <div className="ai-draft-flags">{!column.included && <span>不导出</span>}{column.isLocalId && <span>LOCAL ID</span>}{column.isCode && <span>CODE</span>}{column.isDisplayName && <span>DISPLAY NAME</span>}{column.enumRef && <span>ENUM · {column.enumRef}</span>}{column.aliases.map((alias) => <span key={alias}>{alias}</span>)}</div>
-                    {column.reason && <small>{column.reason}</small>}
-                  </article>)}</div>
-                </details>
-                {draftValidationErrors.length > 0 && <div className="ai-draft-validation" role="alert"><CircleAlert size={15} /><div><strong>草稿还有必填项未完成</strong><span>{draftValidationErrors.slice(0, 4).join("；")}{draftValidationErrors.length > 4 ? `；另有 ${draftValidationErrors.length - 4} 项` : ""}</span></div></div>}
-                <Button onClick={applyDraft} disabled={chatBusy || selectedSession.status === "applied" || draftValidationErrors.length > 0}>{selectedSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{selectedSession.status === "applied" ? "草稿已应用" : "审核后应用到当前表"}</Button>
-              </section>}
-              {currentTodos.length > 0 && <section className="ai-table-todos"><h3>需要人工确认 <span>{currentTodos.length}</span></h3>{currentTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}</section>}
-            </> : <EmptyState icon={Bot} title="为当前表建立 AI 会话" detail="Claude Code 会读取表结构、上下游关系和你配置的本地参考资料，先生成一版供人工审核。" />}
-            <div className="ai-chat-composer"><Textarea value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} placeholder={selectedSession ? "指出不准确的字段、补充业务规则，或要求重新检查…" : "填写本表的生成要求"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void sendMessage(); }} /><div><span>本轮内容写入 <code>{"{{user_message}}"}</code></span><Button onClick={sendMessage} disabled={chatBusy || !health?.ready || !chatMessage.trim() || !promptValid}>{chatBusy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{selectedSession ? "发送并修订" : "生成当前表"}</Button></div></div>
+            <div className="ai-review-workbench">
+              <section className="ai-review-pane ai-review-conversation-pane">
+                <header><div><MessageSquareText size={15} /><strong>原 Session 对话</strong></div>{activeConversationSession && <Badge variant="outline" className={statusClass(activeConversationSession.status)}>{statusLabel(activeConversationSession.status)}</Badge>}</header>
+                <div className="ai-review-pane-scroll">
+                  {activeConversationSession
+                    ? <><SessionTranscript session={{ ...activeConversationSession, status: chatBusy ? "running" : activeConversationSession.status, activities: activity ? [...activeConversationSession.activities, { id: "live", label: activity, at: new Date().toISOString() }] : activeConversationSession.activities }} /><details className="ai-review-trace"><summary><TerminalSquare size={13} />执行轨迹 <span>{activeConversationSession.trace?.length ?? 0}</span></summary><SessionTrace session={activeConversationSession} /></details></>
+                    : <EmptyState icon={Bot} title="为当前表建立 AI 会话" detail="Claude Code 会读取表结构、上下游关系和你配置的本地参考资料，先生成一版供人工审核。" />}
+                </div>
+                <div className="ai-chat-composer"><Textarea ref={workComposerRef} value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} placeholder={activeConversationSession ? "指出不准确的字段、补充业务规则，或要求重新检查…" : "填写本表的生成要求"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void runSessionTurn(activeTable, activeConversationSession, chatMessage, () => setChatMessage("")); }} /><div><span>{activeConversationSession ? "继续现有 Session，不会新建会话" : <>首次生成要求会写入 <code>{"{{user_message}}"}</code></>}</span><Button onClick={() => void runSessionTurn(activeTable, activeConversationSession, chatMessage, () => setChatMessage(""))} disabled={chatBusy || activeConversationBusy || !health?.ready || !chatMessage.trim() || !promptValid}>{chatBusy || activeConversationBusy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{activeConversationBusy ? "Session 执行中" : activeConversationSession ? "继续原 Session" : "生成当前表"}</Button></div></div>
+              </section>
+
+              <section className="ai-review-pane ai-review-draft-pane">
+                <header><div><FileCheck2 size={15} /><strong>结构化审核草稿</strong></div>{draftSaving && <span><Loader2 size={12} className="spin" />正在保存人工修改</span>}</header>
+                <div className="ai-review-pane-scroll">
+                  {activeConversationSession?.draft && draftSummary ? <section className="ai-draft-card">
+                    <div className="ai-draft-heading"><div><FileCheck2 size={16} /><span>类与字段标注</span></div><Badge variant="outline" className={`confidence-${activeConversationSession.draft.confidence}`}>{activeConversationSession.draft.confidence === "high" ? "高置信" : activeConversationSession.draft.confidence === "low" ? "低置信" : "中等置信"}</Badge></div>
+                    <div className="ai-draft-stats"><div><strong>{draftSummary.changedFields}</strong><span>字段有变化</span></div><div><strong>{draftSummary.includedFields}</strong><span>字段将导出</span></div><div><strong>{draftSummary.lowConfidenceFields}</strong><span>低置信字段</span></div></div>
+                    <article className="ai-draft-class-review">
+                      <div className="ai-draft-review-heading"><div><span>类</span><code>{activeConversationSession.draft.className}</code></div><div><Button variant="outline" size="sm" onClick={() => prepareClaudeRevision()}><MessageSquareText size={13} />让 Claude 修订</Button><Button variant="outline" size="sm" onClick={() => setDraftClassEditorOpen(true)} disabled={draftSaving}><FilePenLine size={13} />人工编辑</Button></div></div>
+                      <p>{activeConversationSession.draft.classDescription}</p>
+                      <div className="ai-draft-flags">{activeConversationSession.draft.classAliases.map((alias) => <span key={alias}>{alias}</span>)}</div>
+                      {classTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}
+                    </article>
+                    {draftValidationErrors.length > 0 && <div className="ai-draft-validation" role="alert"><CircleAlert size={15} /><div><strong>草稿还有必填项未完成</strong><span>{draftValidationErrors.slice(0, 4).join("；")}{draftValidationErrors.length > 4 ? `；另有 ${draftValidationErrors.length - 4} 项` : ""}</span></div></div>}
+                    <div className="ai-draft-fields"><div>{activeConversationSession.draft.columns.map((column) => {
+                      const fieldTodos = currentTodos.filter((todo) => todo.scope === "field" && todo.fieldName === column.name);
+                      return <article key={column.name}>
+                        <div className="ai-draft-review-heading"><div><code>{column.name}</code><strong>→</strong><code>{column.entityColumn}</code><Badge variant="outline" className={`confidence-${column.confidence}`}>{column.confidence === "high" ? "高" : column.confidence === "low" ? "低" : "中"}</Badge></div><div><button type="button" onClick={() => prepareClaudeRevision(column.name)}><MessageSquareText size={12} />AI 修订</button><button type="button" onClick={() => setDraftFieldEditorName(column.name)} disabled={draftSaving}><FilePenLine size={12} />人工编辑</button></div></div>
+                        <p>{column.detailedDescription || "暂无详细描述"}</p>
+                        <div className="ai-draft-flags">{!column.included && <span>不导出</span>}{column.isLocalId && <span>LOCAL ID</span>}{column.isCode && <span>CODE</span>}{column.isDisplayName && <span>DISPLAY NAME</span>}{column.isSemantic && <span>SEMANTIC</span>}{column.enumRef && <span>ENUM · {column.enumRef}</span>}{column.aliases.map((alias) => <span key={alias}>{alias}</span>)}</div>
+                        {column.reason && <small>{column.reason}</small>}
+                        {fieldTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}
+                      </article>;
+                    })}</div></div>
+                    <div className="ai-draft-apply"><span>人工编辑只保存到本 Session；应用后才写入表级变更记录。</span><Button onClick={applyDraft} disabled={chatBusy || draftSaving || activeConversationSession.status === "applied" || draftValidationErrors.length > 0}>{activeConversationSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{activeConversationSession.status === "applied" ? "草稿已应用" : "应用到当前表"}</Button></div>
+                  </section> : <EmptyState icon={FileCheck2} title="等待生成审核草稿" detail="左侧完成第一轮生成后，类、字段、枚举和待澄清项会在这里按对象展示。" />}
+                </div>
+              </section>
+            </div>
           </div> : <div className="ai-batch-workspace">
-            <section className="ai-batch-card"><div className="ai-section-heading"><div><WandSparkles size={18} /><span>生成所有 JSON 的标注草稿</span></div><Badge variant="outline">逐表 Session</Badge></div><p>每张表建立独立会话，批量任务只负责统一调度。草稿不会覆盖当前标注。</p><label><span>生成范围</span><Select value={batchDomain} onValueChange={setBatchDomain}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__all__">全部 0级域 · {tables.length} 张表</SelectItem>{domains.map((domain) => <SelectItem key={domain} value={domain}>{domain} · {tables.filter((table) => table.domain0 === domain).length} 张表</SelectItem>)}</SelectContent></Select></label><label><span>批量任务要求</span><Textarea value={batchInstruction} onChange={(event) => setBatchInstruction(event.target.value)} rows={3} /></label><Button onClick={startBatch} disabled={!health?.ready || batchBusy || tables.length === 0 || !batchInstruction.trim() || !promptValid}>{batchBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}启动全量生成</Button></section>
-            {activeJobs.length > 0 && <div className="ai-bulk-stop"><span>{activeJobs.length} 个批量任务正在执行或排队</span><Button variant="destructive" size="sm" onClick={stopAllJobs}><Square size={12} />全部停止</Button></div>}
-            <div className="ai-job-list">{visibleJobs.map((job) => <section className="ai-job-card" key={job.id}><div><div><span className={`ai-session-dot ${statusClass(job.status)}`} /><strong>{job.label}</strong></div><Badge variant="outline" className={statusClass(job.status)}>{statusLabel(job.status)}</Badge></div><Progress value={job.total ? ((job.completed + job.failed) / job.total) * 100 : 0} /><div className="ai-job-stats"><span>{job.completed} 已完成</span><span>{job.failed} 失败</span><span>{Math.max(0, job.total - job.completed - job.failed)} 待处理</span>{["queued", "running", "cancelling"].includes(job.status) && <button onClick={() => stopJob(job)} disabled={job.status === "cancelling"}><Square size={11} />{job.status === "cancelling" ? "停止中" : "停止"}</button>}</div></section>)}</div>
-            <div className="ai-batch-note"><Clock3 size={15} /><p>生成在服务器后台继续运行。关闭浏览器或 SSH 不会中断由 systemd 托管的任务。</p></div>
+            <div className="ai-batch-layout">
+              <div className="ai-batch-primary">
+                <section className="ai-batch-card"><div className="ai-section-heading"><div><WandSparkles size={18} /><span>生成所有 JSON 的标注草稿</span></div><Badge variant="outline">逐表 Session</Badge></div><p>每张表建立独立会话，批量任务只负责统一调度。草稿不会覆盖当前标注。</p><label><span>生成范围</span><Select value={batchDomain} onValueChange={setBatchDomain}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__all__">全部 0级域 · {tables.length} 张表</SelectItem>{domains.map((domain) => <SelectItem key={domain} value={domain}>{domain} · {tables.filter((table) => table.domain0 === domain).length} 张表</SelectItem>)}</SelectContent></Select></label><label><span>本次批量生成要求</span><Textarea value={batchInstruction} onChange={(event) => setBatchInstruction(event.target.value)} rows={4} /></label><Button onClick={startBatch} disabled={!health?.ready || batchBusy || tables.length === 0 || !batchInstruction.trim() || !promptValid}>{batchBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}启动全量生成</Button></section>
+                {activeJobs.length > 0 && <div className="ai-bulk-stop"><span>{activeJobs.length} 个批量任务正在执行或排队</span><Button variant="destructive" size="sm" onClick={stopAllJobs}><Square size={12} />全部停止</Button></div>}
+                <div className="ai-job-list">{visibleJobs.map((job) => <section className="ai-job-card" key={job.id}><div><div><span className={`ai-session-dot ${statusClass(job.status)}`} /><strong>{job.label}</strong></div><Badge variant="outline" className={statusClass(job.status)}>{statusLabel(job.status)}</Badge></div><Progress value={job.total ? ((job.completed + job.failed) / job.total) * 100 : 0} /><div className="ai-job-stats"><span>{job.completed} 已完成</span><span>{job.failed} 失败</span><span>{Math.max(0, job.total - job.completed - job.failed)} 待处理</span>{["queued", "running", "cancelling"].includes(job.status) && <button onClick={() => stopJob(job)} disabled={job.status === "cancelling"}><Square size={11} />{job.status === "cancelling" ? "停止中" : "停止"}</button>}</div></section>)}</div>
+                <div className="ai-batch-note"><Clock3 size={15} /><p>生成在服务器后台继续运行。关闭浏览器或 SSH 不会中断由 systemd 托管的任务。</p></div>
+              </div>
+              <aside className="ai-generation-config">
+                <section className="ai-generation-settings">
+                  <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">自动保存</Badge></div>
+                  <p>单表首次生成、批量生成和后续修订共用此模板；每一轮的具体要求会替换对应占位符。</p>
+                  <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
+                  <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
+                  {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}
+                  {!hasDatasetContextVariable && <div className="ai-prompt-warning"><CircleAlert size={14} />当前模板没有使用 <code>{"{{dataset_context}}"}</code>，Claude Code 将无法从提示词中获得关联表落盘路径。</div>}
+                  <div className="ai-prompt-footer"><span>{promptTemplate.length.toLocaleString("zh-CN")} 字符 · 下一轮任务生效</span><Button variant="outline" size="sm" onClick={() => setPromptTemplate(DEFAULT_ANNOTATION_PROMPT.trim())}><RefreshCw size={13} />恢复默认</Button></div>
+                </section>
+                <section className="ai-generation-settings">
+                  <div className="ai-section-heading"><div><FolderSearch size={18} /><span>本地参考资料</span></div><Badge variant="outline">直接读取</Badge></div>
+                  <p>每行填写一个服务器本地文件或目录。Claude Code 直接阅读这些路径，不建立检索库。</p>
+                  <Textarea value={referenceText} onChange={(event) => setReferenceText(event.target.value)} rows={6} placeholder={"/home/claude/repos/billing\n/home/claude/annotations/ontologies"} />
+                  <small>路径会在任务启动时验证，且必须位于服务端允许的根目录内。</small>
+                </section>
+                <section className="ai-runtime-card"><div><span>导入数据集</span><code>{datasetSyncing ? "正在落盘…" : dataset ? `${dataset.tableCount} 张表 · ${dataset.relationshipCount} 条关系 · 已落盘` : datasetError || "等待本地服务"}</code></div><div><span>运行账户</span><code>{health?.user || "未连接"}</code></div><div><span>Claude Code</span><code>{health?.version || health?.error || "未检测"}</code></div><div><span>登录状态</span><code>{health?.authenticated ? "已登录" : "未登录"}</code></div><div><span>权限模式</span><code>--dangerously-skip-permissions</code></div><div><span>允许根目录</span><div>{health?.allowedRoots?.map((root) => <code key={root}>{root}</code>) ?? <code>等待连接</code>}</div></div></section>
+              </aside>
+            </div>
           </div>}
         </TabsContent>
 
@@ -597,7 +728,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
           <div className="ai-list-heading"><div><strong>待人工审核草稿</strong><span>只有生成完成且不再阻塞澄清的 Session 会进入这里</span></div><Badge variant="outline">{reviewSessions.length} 待审核</Badge></div>
           {reviewSessions.map((session) => <article className="ai-review-card" key={session.id}>
             <div><span className={`ai-session-dot ${statusClass(session.status)}`} /><div><code>{session.tableName}</code><small>{session.domain0} · 更新于 {shortTime(session.updatedAt)}</small></div><Badge variant="outline">{session.todoCount ? `${session.todoCount} 个非阻塞澄清` : "可审核"}</Badge></div>
-            <div><span>{session.messageCount} 条对话</span><span>{session.relatedTableCount ?? 0} 张直接关联表</span><Button size="sm" onClick={() => { setSelectedSessionId(session.id); onReviewTable(session.tableName); setTab("work"); }}>审核此表</Button></div>
+            <div><span>{session.messageCount} 条对话</span><span>{session.relatedTableCount ?? 0} 张直接关联表</span><Button size="sm" onClick={() => openSessionConversation(session.id, session.tableName)}>打开并继续</Button></div>
           </article>)}
           {reviewSessions.length === 0 && <EmptyState icon={CheckCircle2} title="没有待审核草稿" detail="生成完成且无需继续澄清的表会出现在这里。" />}
         </TabsContent>
@@ -609,33 +740,19 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
             {sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} selected={selectedSessionIds.has(session.id)} onClick={() => selectSession(session.id)} onSelectedChange={(checked) => setSessionSelected(session.id, checked)} />)}
             {sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}
           </div>
-          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} /><SessionTrace session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整对话、工具调用及读取资料的过程。" />}</div>
+          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" disabled={!selectedSessionTable} onClick={() => openSessionConversation(selectedSession.id, selectedSession.tableName)}>{selectedSessionTable ? "打开表审核" : "对应表已删除"}</Button></div></div><SessionTranscript session={selectedSession} />{selectedSessionTable ? <div className="ai-session-reply"><Textarea value={sessionMessage} onChange={(event) => setSessionMessage(event.target.value)} placeholder="继续补充要求、指出错误或要求 Claude Code 重新核对资料…" rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage("")); }} /><div><span>{selectedConversationBusy ? "当前 Session 正在执行，完成后可继续" : "消息会通过 Claude Code --resume 接到原上下文"}</span><Button size="sm" onClick={() => void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage(""))} disabled={chatBusy || selectedConversationBusy || !health?.ready || !sessionMessage.trim() || !promptValid}>{chatBusy || selectedConversationBusy ? <Loader2 size={14} className="spin" /> : <Send size={14} />}{selectedConversationBusy ? "执行中" : "继续对话"}</Button></div></div> : <div className="ai-session-table-missing"><CircleAlert size={14} /><span>当前数据中找不到这张表。恢复或重新导入后，才能带着最新表结构继续此 Session。</span></div>}<SessionTrace session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整对话、工具调用及读取资料的过程。" />}</div>
         </TabsContent>
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">
           <div className="ai-list-heading"><div><strong>人工澄清队列</strong><span>答案会回到原表 Session，并触发草稿修订</span></div><Badge variant="outline">{openTodos.length} 待处理</Badge></div>
-          {openTodos.map((todo) => <div key={todo.id} className="ai-todo-with-table"><div><button type="button" onClick={() => { setSelectedSessionId(todo.sessionId); setTab("sessions"); }}><code>{todo.tableName}</code><span>查看会话</span></button><button type="button" onClick={() => { onReviewTable(todo.tableName); setTab("work"); }}>进入表审核</button></div><TodoCard todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} /></div>)}
+          {openTodos.map((todo) => <div key={todo.id} className="ai-todo-with-table"><div><button type="button" onClick={() => { setSelectedSessionId(todo.sessionId); setTab("sessions"); }}><code>{todo.tableName}</code><span>查看会话</span></button><button type="button" onClick={() => openSessionConversation(todo.sessionId, todo.tableName)}>进入并继续</button></div><TodoCard todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} /></div>)}
           {openTodos.length === 0 && <EmptyState icon={CheckCircle2} title="没有待澄清项" detail="检索资料后仍无明确依据或存在冲突的业务概念，才会进入这里。" />}
         </TabsContent>
 
-        <TabsContent value="prompt" className="ai-tab-content ai-prompt-settings">
-          <section>
-            <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">自动保存</Badge></div>
-            <p>这里的内容会原样作为基础模板发送给 Claude Code。单表要求、批量要求和人工澄清会替换对应占位符。</p>
-            <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
-            <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
-            {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}
-            {!hasDatasetContextVariable && <div className="ai-prompt-warning"><CircleAlert size={14} />当前模板没有使用 <code>{"{{dataset_context}}"}</code>，Claude Code 将无法从提示词中获得关联表落盘路径。</div>}
-            <div className="ai-prompt-footer"><span>{promptTemplate.length.toLocaleString("zh-CN")} 字符 · 修改后用于下一轮任务</span><Button variant="outline" size="sm" onClick={() => setPromptTemplate(DEFAULT_ANNOTATION_PROMPT.trim())}><RefreshCw size={13} />恢复默认</Button></div>
-          </section>
-        </TabsContent>
-
-        <TabsContent value="settings" className="ai-tab-content ai-reference-settings">
-          <section><div className="ai-section-heading"><div><FolderSearch size={18} /><span>本地参考资料</span></div><Badge variant="outline">直接读取</Badge></div><p>每行填写一个服务器本地文件或目录。Claude Code直接阅读这些路径，不建立检索库。</p><Textarea value={referenceText} onChange={(event) => setReferenceText(event.target.value)} rows={8} placeholder={"/home/claude/repos/billing\n/home/claude/annotations/ontologies"} /><small>路径会在任务启动时验证，且必须位于服务端允许的根目录内。</small></section>
-          <section className="ai-runtime-card"><div><span>导入数据集</span><code>{datasetSyncing ? "正在落盘…" : dataset ? `${dataset.tableCount} 张表 · ${dataset.relationshipCount} 条关系 · 已落盘` : datasetError || "等待本地服务"}</code></div><div><span>运行账户</span><code>{health?.user || "未连接"}</code></div><div><span>Claude Code</span><code>{health?.version || health?.error || "未检测"}</code></div><div><span>登录状态</span><code>{health?.authenticated ? "已登录" : "未登录"}</code></div><div><span>权限模式</span><code>--dangerously-skip-permissions</code></div><div><span>允许根目录</span><div>{health?.allowedRoots?.map((root) => <code key={root}>{root}</code>) ?? <code>等待连接</code>}</div></div></section>
-        </TabsContent>
       </Tabs>
     </main>
+    <TableConfigDialog open={draftClassEditorOpen} table={reviewDraftTable} onOpenChange={setDraftClassEditorOpen} onSave={(value) => { void saveDraftClass(value); }} />
+    <FieldEditorDialog open={Boolean(draftFieldEditorName)} table={reviewDraftTable} column={reviewDraftColumn} onOpenChange={(nextOpen) => { if (!nextOpen) setDraftFieldEditorName(null); }} onSave={(annotation) => { void saveDraftField(annotation); }} />
     <AlertDialog open={sessionDeleteOpen} onOpenChange={setSessionDeleteOpen}>
       <AlertDialogContent>
         <AlertDialogHeader>

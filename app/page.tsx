@@ -1671,7 +1671,7 @@ export default function Home() {
     if (duplicate) throw new Error(`类名 ${draft.className} 已被 ${duplicate.tableName} 使用`);
     const next = mergeAiDraftIntoTable(table, draft);
     const validationErrors = validateExportConfiguration([next]);
-    if (validationErrors.length) throw new Error(`Claude 草稿仍有必填项未完成：${validationErrors.slice(0, 3).join("；")}`);
+    if (validationErrors.length) throw new Error(`审核草稿仍有必填项未完成：${validationErrors.slice(0, 3).join("；")}`);
     const before = {
       className: table.className,
       classDescription: table.classDescription,
@@ -1687,7 +1687,7 @@ export default function Home() {
     setTables((current) => current.map((item) => item.tableName === next.tableName ? next : item));
     addChanges([{
       action: "apply_ai_draft",
-      label: `应用 Claude Code 标注草稿`,
+      label: `应用 AI 与人工审核后的标注草稿`,
       tableName: next.tableName,
       tableSnapshot: makeTableAuditSnapshot(next),
       source: "claude-code",

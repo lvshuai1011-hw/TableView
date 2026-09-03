@@ -40,7 +40,7 @@ function FieldEditorForm({
   column: Column;
   onOpenChange: (open: boolean) => void;
   onSave: (annotation: ColumnAnnotation) => void;
-  onDelete: () => void;
+  onDelete?: () => void;
 }) {
   const [draft, setDraft] = useState<ColumnAnnotation>(() => migrateColumn(column).annotation!);
   const [aliasesText, setAliasesText] = useState(() => draft.aliases.join("，"));
@@ -155,7 +155,7 @@ function FieldEditorForm({
       {missingRequired.length > 0 && <div className="required-fields-alert" role="alert"><CircleAlert size={15} /><div><strong>还不能保存</strong><span>请填写：{missingRequired.join("、")}</span></div></div>}
     </div>
     <DialogFooter className="editor-footer">
-      <Button variant="outline" className="editor-delete" onClick={onDelete}><Trash2 size={14} />删除字段</Button>
+      {onDelete && <Button variant="outline" className="editor-delete" onClick={onDelete}><Trash2 size={14} />删除字段</Button>}
       <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parsedAliases, detailedDescription: draft.detailedDescription.trim(), enumRef: enumEnabled ? draft.enumRef.trim() : "", enumDescription: enumEnabled ? draft.enumDescription.trim() : "", enumValues: enumEnabled ? parsedEnumValues : [] })}>保存标注</Button></div>
     </DialogFooter>
   </DialogContent>;
@@ -174,7 +174,7 @@ export function FieldEditorDialog({
   column?: Column;
   onOpenChange: (open: boolean) => void;
   onSave: (annotation: ColumnAnnotation) => void;
-  onDelete: () => void;
+  onDelete?: () => void;
 }) {
   return <Dialog open={open} onOpenChange={onOpenChange}>
     {table && column && <FieldEditorForm key={`${table.tableName}:${column.name}:${open}`} table={table} column={column} onOpenChange={onOpenChange} onSave={onSave} onDelete={onDelete} />}
@@ -223,7 +223,7 @@ function actionLabel(action: ChangeRecord["action"]) {
     delete_table: "删除表",
     delete_field: "删除字段",
     update_field: "更新字段标注",
-    apply_ai_draft: "应用 AI 草稿",
+    apply_ai_draft: "应用审核草稿",
     update_class_name: "更新类信息",
     update_relationship: "更新外键关系",
     rename_domain0: "修改 0级域",

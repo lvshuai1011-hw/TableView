@@ -453,6 +453,33 @@ async function handleChat(request, response) {
   response.end();
 }
 
+async function handleDraftUpdate(request, response, sessionId) {
+  const session = await store.readSession(sessionId);
+  if (!session) return jsonResponse(response, 404, { error: "会话不存在" });
+  if (runningSessions.has(session.id) || ["queued", "running", "cancelling"].includes(session.status)) {
+    return jsonResponse(response, 409, { error: "该会话正在执行，请等待本轮完成后再人工修改" });
+  }
+  const body = await readJsonBody(request);
+  if (!validTable(body.table) || body.table.tableName !== session.tableName) {
+    return jsonResponse(response, 409, { error: "审核草稿与当前表不匹配" });
+  }
+  if (!body.draft || typeof body.draft !== "object") {
+    return jsonResponse(response, 400, { error: "缺少有效的审核草稿" });
+  }
+  const normalized = normalizeStructuredOutput({ draft: body.draft, reply: "", todos: [] }, body.table, session.id);
+  session.draft = normalized.draft;
+  session.status = session.todos.some((todo) => todo.status === "open" && todo.blocking) ? "needs_clarification" : "draft_ready";
+  session.error = null;
+  const changeLabel = typeof body.label === "string" && body.label.trim()
+    ? body.label.trim().slice(0, 240)
+    : "更新了审核草稿";
+  session.messages.push(message("system", `人工${changeLabel}。`));
+  await writeFile(path.join(store.workspacePath(session.id), "current-draft.json"), `${JSON.stringify(session.draft, null, 2)}\n`, "utf8");
+  await store.saveSession(session);
+  session.trace = await store.readSessionTrace(session.id);
+  return jsonResponse(response, 200, { session });
+}
+
 async function handleGenerate(request, response) {
   const body = await readJsonBody(request);
   const tables = Array.isArray(body.tables) ? body.tables.filter(validTable) : [];
@@ -523,7 +550,7 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   if (!url.pathname.startsWith("/api/ai/")) return jsonResponse(response, 404, { error: "接口不存在" });
   if (request.method === "OPTIONS") {
-    response.writeHead(204, { allow: "GET, POST, DELETE, OPTIONS", "cache-control": "no-store" });
+    response.writeHead(204, { allow: "GET, POST, PATCH, DELETE, OPTIONS", "cache-control": "no-store" });
     return response.end();
   }
   if (url.pathname === "/api/ai/health") {
@@ -587,6 +614,11 @@ async function handleRequest(request, response) {
     session.messages.push(message("system", "人工已将本版草稿应用到表标注。"));
     await store.saveSession(session);
     return jsonResponse(response, 200, { session });
+  }
+  const draftMatch = url.pathname.match(/^\/api\/ai\/sessions\/([0-9a-f-]+)\/draft$/i);
+  if (draftMatch) {
+    if (request.method !== "PATCH") return methodNotAllowed(response);
+    return handleDraftUpdate(request, response, draftMatch[1]);
   }
   const jobMatch = url.pathname.match(/^\/api\/ai\/jobs\/([0-9a-f-]+)$/i);
   if (jobMatch) {
