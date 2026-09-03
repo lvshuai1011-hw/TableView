@@ -31,6 +31,8 @@ export type Column = {
   annotation?: ColumnAnnotation;
 };
 
+export type TableAnnotationStatus = "unannotated" | "in_progress" | "completed";
+
 export type ColumnMapping = {
   parentColumn: string;
   childColumn: string;
@@ -57,6 +59,7 @@ export type SchemaTable = {
   folder: string;
   domain0: string;
   domain1: string;
+  annotationStatus?: TableAnnotationStatus;
   columns: Column[];
   foreignKeys: Relationship[];
   referencedBy: Relationship[];

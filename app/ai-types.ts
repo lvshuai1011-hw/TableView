@@ -126,5 +126,6 @@ export type AiPanelProps = {
   datasetReady: boolean;
   initialTableName: string | null;
   onReviewTable: (tableName: string | null) => void;
+  onAnnotationStarted: (tableNames: string[]) => void;
   onApplyDraft: (draft: AiTableDraft, session: AiSession) => void;
 };

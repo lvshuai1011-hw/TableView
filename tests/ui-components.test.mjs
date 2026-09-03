@@ -498,3 +498,88 @@ test("requires descriptions and aliases before exporting an included field", asy
   assert.ok(errors.some((error) => error.includes("字段别名")));
   assert.ok(errors.some((error) => error.includes("中英文业务说明")));
 });
+
+test("tracks table annotation lifecycle and restores a cleared annotation set", async () => {
+  const {
+    getTableAnnotationStatus,
+    migrateTables,
+    resetTableAnnotations,
+    restoreTableFromChange,
+    settleTableAnnotationStatus,
+  } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const relationship = {
+    name: "FK_LIFECYCLE_PARENT",
+    parentTable: "PARENT_TABLE",
+    childTable: "TABLE_LIFECYCLE",
+    cardinality: "1:N",
+    cardinalityRaw: "0..*",
+    deleteConstraint: "RESTRICT",
+    updateConstraint: "RESTRICT",
+    constraintName: "FK_LIFECYCLE_PARENT",
+    columnMapping: [{ parentColumn: "ID", childColumn: "ID" }],
+  };
+  const [imported] = migrateTables([{
+    tableName: "TABLE_LIFECYCLE",
+    description: "导入时的原始表说明",
+    folder: "Lifecycle",
+    domain0: "Demo",
+    domain1: "Lifecycle",
+    columns: [{ name: "ID", description: "标识", dataType: "NUMBER(20)", length: "20", isPrimaryKey: true, nullable: false, remark: "原始字段备注" }],
+    foreignKeys: [relationship],
+    referencedBy: [],
+  }]);
+
+  assert.equal(getTableAnnotationStatus(imported), "unannotated");
+
+  const inProgress = settleTableAnnotationStatus({
+    ...imported,
+    classAliases: ["生命周期实体"],
+  });
+  assert.equal(getTableAnnotationStatus(inProgress), "in_progress");
+
+  const completed = settleTableAnnotationStatus({
+    ...inProgress,
+    className: "LifecycleEntity",
+    classDescription: "中文描述：生命周期实体。 English Description: Lifecycle entity.",
+    classAliases: ["Lifecycle entity", "生命周期实体"],
+    columns: inProgress.columns.map((column) => ({
+      ...column,
+      annotation: {
+        ...column.annotation,
+        aliases: ["Identifier", "标识"],
+        detailedDescription: "中文描述：唯一标识生命周期实体。 English Description: Uniquely identifies the lifecycle entity.",
+        isLocalId: true,
+      },
+    })),
+  });
+  assert.equal(getTableAnnotationStatus(completed), "completed");
+
+  const reset = resetTableAnnotations(completed, ["TableLifecycle"]);
+  assert.equal(getTableAnnotationStatus(reset), "unannotated");
+  assert.equal(reset.className, "TableLifecycle2");
+  assert.equal(reset.classDescription, imported.description);
+  assert.deepEqual(reset.classAliases, []);
+  assert.equal(reset.columns[0].annotation.entityColumn, "id");
+  assert.deepEqual(reset.columns[0].annotation.aliases, []);
+  assert.equal(reset.columns[0].annotation.isLocalId, false);
+  assert.equal(reset.columns[0].description, "标识");
+  assert.equal(reset.columns[0].remark, "原始字段备注");
+  assert.deepEqual(reset.foreignKeys, [relationship]);
+  assert.equal(reset.domain0, "Demo");
+  assert.equal(reset.domain1, "Lifecycle");
+
+  const restored = restoreTableFromChange(reset, {
+    id: "reset-annotations",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    action: "reset_annotations",
+    label: "清空表标注",
+    tableName: completed.tableName,
+    before: completed,
+    after: reset,
+  });
+  assert.ok(restored);
+  assert.equal(getTableAnnotationStatus(restored), "completed");
+  assert.equal(restored.className, "LifecycleEntity");
+  assert.deepEqual(restored.classAliases, ["Lifecycle entity", "生命周期实体"]);
+  assert.equal(restored.columns[0].annotation.isLocalId, true);
+});

@@ -202,7 +202,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .tree-table-row:hover, .tree-table-row.active { color: #d9f4ef; background: rgba(82, 192, 177, .08); }
 .tree-table-open { min-width: 0; height: 32px; flex: 1; display: flex; align-items: center; gap: 7px; padding: 0 5px 0 8px; color: #71879d; background: transparent; border: 0; text-align: left; }
 .tree-table-row:hover .tree-table-open, .tree-table-row.active .tree-table-open { color: #d9f4ef; }
-.tree-table-open code { min-width: 0; overflow: hidden; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.tree-table-open code { min-width: 0; flex: 1; overflow: hidden; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.table-annotation-status { height: 20px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0 7px; color: #66798d; background: #eef1f3; border: 1px solid #d9e0e4; border-radius: 999px; font-size: 9px; font-weight: 700; line-height: 1; white-space: nowrap; }
+.table-annotation-status.in_progress { color: #9a671e; background: #fff6df; border-color: #efd59e; }
+.table-annotation-status.completed { color: #167368; background: #e7f5f2; border-color: #bfe1da; }
+.atlas-sidebar .table-annotation-status { height: 17px; padding-inline: 5px; font-size: 7.5px; }
 .catalog-delete { width: 28px; height: 28px; flex: 0 0 28px; display: grid; place-items: center; color: #8a6f79; background: transparent; border: 0; border-radius: 6px; opacity: .55; }
 .catalog-delete:hover { color: #ffaaa4; background: rgba(194, 76, 76, .16); opacity: 1; }
 
@@ -223,6 +227,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .flat-table-row:hover .flat-table-open, .flat-table-row.active .flat-table-open { color: #e8f7f4; }
 .flat-table-open > span { width: 28px; height: 28px; display: grid; place-items: center; color: #6ccabc; background: rgba(87, 199, 184, .09); border-radius: 7px; }
 .flat-table-open > div { min-width: 0; display: grid; gap: 4px; }
+.flat-table-title { min-width: 0; display: flex; align-items: center; gap: 5px; }
+.flat-table-title code { min-width: 0; flex: 1; }
 .flat-catalog code { overflow: hidden; color: inherit; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .flat-catalog small { overflow: hidden; color: #5e748b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .flat-table-open > em { color: #637990; font-size: 9px; font-style: normal; }
@@ -261,6 +267,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .model-status { display: flex; align-items: center; gap: 7px; color: #64768a; font-size: 10px; }
 .model-status i { width: 7px; height: 7px; background: #4fc69a; border-radius: 50%; }
 .model-status span { width: 1px; height: 12px; margin: 0 2px; background: #d9e0e2; }
+.annotation-overview { display: flex; align-items: center; gap: 3px; padding: 4px; background: #eef2f3; border: 1px solid #dfe5e7; border-radius: 8px; }
+.annotation-overview strong { padding: 4px 6px; color: #68798a; border-radius: 5px; font-size: 8.5px; font-weight: 700; white-space: nowrap; }
+.annotation-overview .completed { color: #126e64; background: #ddf1ed; }
+.annotation-overview .in_progress { color: #97631c; background: #fff2d4; }
+.annotation-overview .unannotated { color: #68798a; background: #f8f9f9; }
 .quality-alert { display: flex; align-items: center; gap: 4px; color: #b35450; font-size: 10px; font-weight: 700; }
 
 /* Relationship canvas */
@@ -378,12 +389,17 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .class-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 24px 10px; padding: 10px 12px; color: #6d7f90; background: #edf4f3; border: 1px solid #d6e8e5; border-radius: 8px; }
 .class-summary > div { min-width: 0; display: grid; gap: 3px; }
 .class-summary span { font-size: 8px; }
+.class-summary-name { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.class-summary-name code { min-width: 0; flex: 1; }
 .class-summary code { overflow: hidden; color: #226b65; font-size: 10px; font-weight: 700; text-overflow: ellipsis; }
 .class-summary button { display: flex; align-items: center; gap: 5px; padding: 6px 8px; color: #27776f; background: #fff; border: 1px solid #cce0dd; border-radius: 6px; font-size: 9px; }
-.inspector-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 24px 14px; }
+.inspector-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0 24px 14px; }
 .inspector-actions button { min-width: 0; padding-inline: 9px; font-size: 9px; }
 .ai-from-sheet { color: #176f68; background: #edf8f6; border-color: #bfdfda; }
-.focus-from-sheet, .delete-from-sheet { height: 38px; font-size: 11px; }
+.focus-from-sheet, .reset-annotations-from-sheet, .delete-from-sheet { height: 38px; font-size: 11px; }
+.reset-annotations-from-sheet { color: #956117; background: #fffaf0; border-color: #ead7af; }
+.reset-annotations-from-sheet:hover { color: #7f4f0b; background: #fff3da; border-color: #dfc184; }
+.reset-annotations-from-sheet:disabled { color: #9da6ad; background: #f5f6f6; border-color: #e0e4e6; }
 .delete-from-sheet { color: #a54b4b; border-color: #e5cccc; }
 .delete-from-sheet:hover { color: #923d3d; background: #fff1f1; border-color: #dab1b1; }
 .inspector-tabs { padding: 0 24px 28px; }
@@ -481,6 +497,20 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .restore-change-preview span { color: #84929f; font-size: 9px; }
 .restore-dialog [data-slot="alert-dialog-footer"] { padding: 14px 27px 19px; background: #f8faf9; border-top: 1px solid #e4e9ea; }
 .restore-dialog [data-slot="alert-dialog-footer"] button { height: 36px; gap: 6px; font-size: 10px; }
+.reset-annotations-dialog { overflow: hidden; padding: 0; }
+.reset-annotations-dialog [data-slot="alert-dialog-header"] { padding: 25px 27px 7px; }
+.reset-dialog-mark { width: 40px; height: 40px; display: grid; place-items: center; margin-bottom: 8px; color: #946017; background: #fff1d2; border-radius: 10px 10px 10px 3px; }
+.reset-annotations-dialog h2 { color: #25384d; font-size: 18px; }
+.reset-annotations-dialog [data-slot="alert-dialog-description"] { color: #788897; font-size: 10px; line-height: 1.6; }
+.reset-annotations-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 5px 27px 10px; overflow: hidden; background: #e2e7e9; border: 1px solid #e2e7e9; border-radius: 8px; }
+.reset-annotations-preview > div { min-width: 0; display: grid; align-content: center; gap: 6px; min-height: 66px; padding: 10px; background: #faf8f3; }
+.reset-annotations-preview span { color: #8a806f; font-size: 8px; }
+.reset-annotations-preview code, .reset-annotations-preview strong { min-width: 0; overflow: hidden; color: #5b4b34; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.reset-annotations-note { margin: 0 27px 18px; color: #8a7960; font-size: 9px; line-height: 1.55; }
+.reset-annotations-dialog [data-slot="alert-dialog-footer"] { padding: 14px 27px 19px; background: #f8faf9; border-top: 1px solid #e4e9ea; }
+.reset-annotations-dialog [data-slot="alert-dialog-footer"] button { height: 36px; gap: 6px; font-size: 10px; }
+.reset-annotations-confirm { color: #fff; background: #9a681f; }
+.reset-annotations-confirm:hover { background: #815412; }
 
 /* JSON import */
 .import-dialog { overflow: hidden; padding: 0; }
@@ -896,6 +926,7 @@ body:has(.ai-workbench-page) [data-slot="dialog-content"], body:has(.ai-workbenc
   .ai-review-workbench { grid-template-columns: 1fr; }
   .ai-review-pane { min-height: 620px; }
   .ai-batch-layout { grid-template-columns: 1fr; }
+  .annotation-overview { display: none; }
 }
 
 @media (max-width: 680px) {
@@ -946,6 +977,7 @@ body:has(.ai-workbench-page) [data-slot="dialog-content"], body:has(.ai-workbenc
   .ai-table-context-actions { align-items: stretch; flex-direction: column; }
   .ai-table-context [data-slot="select-trigger"] { width: 100%; max-width: none; }
   .inspector-actions { grid-template-columns: 1fr; }
+  .reset-annotations-preview { grid-template-columns: 1fr; }
   .inspector-sheet.is-table-fullscreen [data-slot="sheet-header"] { padding-right: 24px; padding-left: 18px; }
   .inspector-sheet.is-table-fullscreen .inspector-summary,
   .inspector-sheet.is-table-fullscreen .class-summary,

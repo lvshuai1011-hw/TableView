@@ -95,6 +95,7 @@ import {
   Relationship,
   SchemaTable,
   seedTables,
+  TableAnnotationStatus,
   UNCLASSIFIED,
 } from "./data";
 import {
@@ -117,6 +118,7 @@ import {
   defaultClassName,
   findDeletedTableRecoveryRecord,
   getTableChangeRecords,
+  getTableAnnotationStatus,
   isSelfRelationship,
   inspectRelationshipMappings,
   isMissingRelationField,
@@ -128,7 +130,9 @@ import {
   migrateTables,
   normalizeDomain1,
   RelationFieldState,
+  resetTableAnnotations,
   restoreTableFromChange,
+  settleTableAnnotationStatus,
   validateExportConfiguration,
 } from "./schema-utils";
 
@@ -137,13 +141,29 @@ const CANVAS_HEIGHT = 720;
 const MISSING_ID = "missing:endpoints";
 const TABLE_STORAGE_KEY = "schema-atlas.tables.v1";
 
-type ParsedTable = Omit<SchemaTable, "domain0" | "domain1" | "className" | "classDescription" | "classAliases">;
+type ParsedTable = Omit<SchemaTable, "domain0" | "domain1" | "className" | "classDescription" | "classAliases" | "annotationStatus">;
 type DirectionFilter = "both" | "dependencies" | "dependents";
 type Scope =
   | { level: "global" }
   | { level: "domain"; domain0: string }
   | { level: "folder"; domain0: string; domain1: string }
   | { level: "focus"; tableName: string };
+
+const ANNOTATION_STATUS_COPY: Record<TableAnnotationStatus, { label: string; short: string }> = {
+  unannotated: { label: "未标注", short: "未标注" },
+  in_progress: { label: "标注中", short: "标注中" },
+  completed: { label: "已完整标注", short: "完整" },
+};
+
+function annotationStatusCopy(table: SchemaTable) {
+  const status = getTableAnnotationStatus(table);
+  return { status, ...ANNOTATION_STATUS_COPY[status] };
+}
+
+function AnnotationStatusPill({ table, compact = false }: { table: SchemaTable; compact?: boolean }) {
+  const { status, label, short } = annotationStatusCopy(table);
+  return <span className={`table-annotation-status ${status}`} title={`标注状态：${label}`}>{compact ? short : label}</span>;
+}
 type Camera = { x: number; y: number; scale: number };
 type Inspector =
   | { kind: "table"; tableName: string }
@@ -446,7 +466,7 @@ function buildScopeGraph(
       kind: "table",
       label: table.tableName,
       caption: table.description || "暂无表说明",
-      meta: `${table.columns.length} 字段 · 直接隶属 0级域`,
+      meta: `${table.columns.length} 字段 · 直属 0级域 · ${annotationStatusCopy(table).short}`,
       tableName: table.tableName,
       domain0: table.domain0,
       members: [table.tableName],
@@ -511,7 +531,7 @@ function buildScopeGraph(
       kind: "table",
       label: table.tableName,
       caption: table.description || "暂无表说明",
-      meta: `${table.columns.length} 字段 · ${table.columns.filter((column) => column.isPrimaryKey).length} 主键`,
+      meta: `${table.columns.length} 字段 · ${table.columns.filter((column) => column.isPrimaryKey).length} 主键 · ${annotationStatusCopy(table).short}`,
       tableName: table.tableName,
       domain0: table.domain0,
       domain1: table.domain1,
@@ -548,7 +568,7 @@ function buildScopeGraph(
             kind: "table",
             label: table.tableName,
             caption: "本域直属表",
-            meta: `${table.columns.length} 字段`,
+            meta: `${table.columns.length} 字段 · ${annotationStatusCopy(table).short}`,
             external: true,
             tableName: table.tableName,
             domain0: table.domain0,
@@ -630,7 +650,7 @@ function buildScopeGraph(
       kind: table ? "table" : "ghost",
       label: tableName,
       caption: table?.description || "未导入，仅来自关系定义",
-      meta: table ? [table.domain0, table.domain1].filter(Boolean).join(" / ") : "缺少对应 JSON",
+      meta: table ? [...[table.domain0, table.domain1].filter(Boolean), annotationStatusCopy(table).short].join(" / ") : "缺少对应 JSON",
       count: table?.columns.length ?? 0,
       tableName,
       domain0: table?.domain0,
@@ -840,7 +860,7 @@ function AppSidebar({
               </div>
               {domainOpen && <div className="tree-children">{[...folders.entries()].map(([domain1, items]) => {
                 if (!domain1) return <div className="tree-direct-tables" key={`${domain0}:direct`}>{items.map((table) => <div key={table.tableName} className={`tree-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
-                  <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code></button>
+                  <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code><AnnotationStatusPill table={table} compact /></button>
                   <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={12} /></button>
                 </div>)}</div>;
                 const folderKey = `${domain0}/${domain1}`;
@@ -855,7 +875,7 @@ function AppSidebar({
                     <button className="tree-edit" onClick={() => onRenameDomain1(domain0, domain1)} aria-label={`修改 1级域 ${domain1}`} title="修改域名"><FilePenLine size={11} /></button>
                   </div>
                   {folderOpen && <div className="tree-tables">{items.map((table) => <div key={table.tableName} className={`tree-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
-                    <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code></button>
+                    <button className="tree-table-open" onClick={() => onScope({ level: "focus", tableName: table.tableName })}><Table2 size={12} /><code>{table.tableName}</code><AnnotationStatusPill table={table} compact /></button>
                     <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={12} /></button>
                   </div>)}</div>}
                 </div>;
@@ -869,7 +889,7 @@ function AppSidebar({
           {filteredTables.map((table) => <div key={table.tableName} className={`flat-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
             {managingTables && <input type="checkbox" checked={selectedTables.has(table.tableName)} onChange={() => toggleSelectedTable(table.tableName)} aria-label={`选择 ${table.tableName}`} />}
             <button className="flat-table-open" onClick={() => managingTables ? toggleSelectedTable(table.tableName) : onScope({ level: "focus", tableName: table.tableName })}>
-              <span><Table2 size={14} /></span><div><code>{table.tableName}</code><small>{[table.domain0, table.domain1].filter(Boolean).join(" · ")}</small></div><em>{table.columns.length}</em>
+              <span><Table2 size={14} /></span><div><div className="flat-table-title"><code>{table.tableName}</code><AnnotationStatusPill table={table} compact /></div><small>{[table.domain0, table.domain1].filter(Boolean).join(" · ")}</small></div><em>{table.columns.length}</em>
             </button>
             {!managingTables && <button className="catalog-delete" onClick={() => onRequestDelete([table.tableName])} aria-label={`删除 ${table.tableName}`} title="删除表"><Trash2 size={13} /></button>}
           </div>)}
@@ -1195,6 +1215,7 @@ function InspectorSheet({
   onRequestDeleteField,
   onEditTable,
   onOpenAi,
+  onResetAnnotations,
   onExportChanges,
   onRestoreChange,
 }: {
@@ -1210,6 +1231,7 @@ function InspectorSheet({
   onRequestDeleteField: (tableName: string, fieldName: string) => void;
   onEditTable: (tableName: string) => void;
   onOpenAi: (tableName: string) => void;
+  onResetAnnotations: (tableName: string) => void;
   onExportChanges: (tableName: string) => void;
   onRestoreChange: (record: ChangeRecord) => void;
 }) {
@@ -1228,6 +1250,7 @@ function InspectorSheet({
   const hasImportedFieldInfo = selectedTable?.columns.some((column) => Boolean(column.description || column.remark)) ?? false;
   const title = inspector?.kind === "table" ? tableName : inspector?.kind === "relations" ? inspector.title : selectedGroup?.label ?? "关系详情";
   const inspectorDescription = selectedTable?.description || (selectedGroup?.caption ?? "");
+  const selectedAnnotationStatus = selectedTable ? getTableAnnotationStatus(selectedTable) : "unannotated";
 
   return <Sheet open={Boolean(inspector)} onOpenChange={(open) => { if (!open) onClose(); }}>
     <SheetContent className={`inspector-sheet ${inspector?.kind === "table" ? "is-table-fullscreen" : ""}`}>
@@ -1245,10 +1268,11 @@ function InspectorSheet({
           <div><span>我依赖</span><strong>{outbound.length}</strong></div>
           <div><span>依赖我</span><strong>{inbound.length}</strong></div>
         </div>
-        <div className="class-summary"><div><span>对应类</span><code>{selectedTable.className}</code></div><button onClick={() => onEditTable(selectedTable.tableName)}><Settings2 size={14} />配置类</button></div>
+        <div className="class-summary"><div><span>对应类</span><div className="class-summary-name"><code>{selectedTable.className}</code><AnnotationStatusPill table={selectedTable} /></div></div><button onClick={() => onEditTable(selectedTable.tableName)}><Settings2 size={14} />配置类</button></div>
         <div className="inspector-actions">
           <Button variant="outline" className="ai-from-sheet" onClick={() => onOpenAi(selectedTable.tableName)}><Sparkles size={15} />AI 审核此表</Button>
           <Button className="focus-from-sheet" onClick={() => onFocus(selectedTable.tableName)}><Focus size={15} />聚焦该表关系</Button>
+          <Button variant="outline" className="reset-annotations-from-sheet" disabled={selectedAnnotationStatus === "unannotated"} onClick={() => onResetAnnotations(selectedTable.tableName)}><RotateCcw size={15} />清空标注</Button>
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
         </div>
         <Tabs defaultValue="relations" className="inspector-tabs">
@@ -1399,6 +1423,7 @@ export default function Home() {
   const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
   const [fieldTarget, setFieldTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
   const [fieldDeleteTarget, setFieldDeleteTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
+  const [annotationResetTarget, setAnnotationResetTarget] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<ChangeRecord | null>(null);
   const [tableConfigTarget, setTableConfigTarget] = useState<string | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
@@ -1420,6 +1445,10 @@ export default function Home() {
     }).sort((left, right) => left.tableName.localeCompare(right.tableName));
   }, [changeHistory, tables]);
   const fieldGapCount = useMemo(() => countRelationshipFieldGaps(relationships, tables), [relationships, tables]);
+  const annotationCounts = useMemo(() => tables.reduce<Record<TableAnnotationStatus, number>>((counts, table) => {
+    counts[getTableAnnotationStatus(table)] += 1;
+    return counts;
+  }, { unannotated: 0, in_progress: 0, completed: 0 }), [tables]);
   const graph = useMemo(() => buildScopeGraph(scope, tables, relationships, depth, direction), [scope, tables, relationships, depth, direction]);
   const selectedFieldTable = fieldTarget ? tables.find((table) => table.tableName === fieldTarget.tableName) : undefined;
   const selectedField = selectedFieldTable?.columns.find((column) => column.name === fieldTarget?.fieldName);
@@ -1500,6 +1529,7 @@ export default function Home() {
         className: defaultClassName(table.tableName),
         classDescription: table.description,
         classAliases: [],
+        annotationStatus: "unannotated",
         domain0,
         domain1,
         folder: domain1,
@@ -1590,11 +1620,21 @@ export default function Home() {
   const saveFieldAnnotation = (annotation: ColumnAnnotation) => {
     if (!fieldTarget || !selectedField || !selectedFieldTable) return;
     const before = migrateColumn(selectedField).annotation;
-    setTables((current) => current.map((table) => table.tableName !== fieldTarget.tableName ? table : {
-      ...table,
-      columns: table.columns.map((column) => column.name === fieldTarget.fieldName ? { ...column, annotation } : column),
-    }));
-    addChanges([{ action: "update_field", label: `更新字段标注 ${fieldTarget.tableName}.${fieldTarget.fieldName}`, tableName: fieldTarget.tableName, fieldName: fieldTarget.fieldName, tableSnapshot: makeTableAuditSnapshot(selectedFieldTable), before, after: annotation }]);
+    const previousStatus = getTableAnnotationStatus(selectedFieldTable);
+    const nextTable = settleTableAnnotationStatus({
+      ...selectedFieldTable,
+      columns: selectedFieldTable.columns.map((column) => column.name === fieldTarget.fieldName ? { ...column, annotation } : column),
+    });
+    setTables((current) => current.map((table) => table.tableName === nextTable.tableName ? nextTable : table));
+    addChanges([{
+      action: "update_field",
+      label: `更新字段标注 ${fieldTarget.tableName}.${fieldTarget.fieldName}`,
+      tableName: fieldTarget.tableName,
+      fieldName: fieldTarget.fieldName,
+      tableSnapshot: makeTableAuditSnapshot(nextTable),
+      before: { annotation: before, annotationStatus: previousStatus },
+      after: { annotation, annotationStatus: getTableAnnotationStatus(nextTable) },
+    }]);
     setFieldTarget(null);
     toast.success("字段标注已保存");
   };
@@ -1617,20 +1657,29 @@ export default function Home() {
       ));
       return columnMapping.length ? [{ ...relationship, columnMapping }] : [];
     });
-    setTables((current) => current.map((item) => ({
-      ...item,
-      columns: item.tableName === target.tableName ? item.columns.filter((field) => field.name !== target.fieldName) : item.columns,
-      foreignKeys: cleanRelations(item.foreignKeys),
-      referencedBy: cleanRelations(item.referencedBy),
-    })));
+    const previousStatus = getTableAnnotationStatus(table);
+    const nextTables = tables.map((item) => {
+      const cleaned = {
+        ...item,
+        columns: item.tableName === target.tableName ? item.columns.filter((field) => field.name !== target.fieldName) : item.columns,
+        foreignKeys: cleanRelations(item.foreignKeys),
+        referencedBy: cleanRelations(item.referencedBy),
+      };
+      if (item.tableName !== target.tableName) return cleaned;
+      return previousStatus === "unannotated"
+        ? { ...cleaned, annotationStatus: "unannotated" as const }
+        : settleTableAnnotationStatus(cleaned);
+    });
+    const nextTargetTable = nextTables.find((item) => item.tableName === target.tableName)!;
+    setTables(nextTables);
     const tableIndex = new Map(tables.map((item) => [item.tableName, item]));
     const auditDrafts: ChangeRecordDraft[] = [{
       action: "delete_field",
       label: `删除字段 ${target.tableName}.${target.fieldName}`,
       tableName: target.tableName,
       fieldName: target.fieldName,
-      tableSnapshot: makeTableAuditSnapshot(table),
-      before: { column, index: table.columns.findIndex((item) => item.name === target.fieldName), relationships: affectedRelations },
+      tableSnapshot: makeTableAuditSnapshot(nextTargetTable),
+      before: { column, index: table.columns.findIndex((item) => item.name === target.fieldName), relationships: affectedRelations, annotationStatus: previousStatus },
       after: null,
     }];
     relationshipNeighbors(target.tableName, affectedRelations).forEach((tableName) => {
@@ -1656,9 +1705,10 @@ export default function Home() {
     if (!selectedConfigTable) return;
     const duplicate = tables.find((table) => table.tableName !== selectedConfigTable.tableName && table.className.toLowerCase() === value.className.toLowerCase());
     if (duplicate) return setTableConfigError(`类名已被 ${duplicate.tableName} 使用，请保持一表一类。`);
-    const before = { className: selectedConfigTable.className, classDescription: selectedConfigTable.classDescription, classAliases: selectedConfigTable.classAliases };
-    setTables((current) => current.map((table) => table.tableName === selectedConfigTable.tableName ? { ...table, ...value } : table));
-    addChanges([{ action: "update_class_name", label: `更新 ${selectedConfigTable.tableName} 的类信息`, tableName: selectedConfigTable.tableName, tableSnapshot: makeTableAuditSnapshot({ ...selectedConfigTable, ...value }), before, after: value }]);
+    const before = { className: selectedConfigTable.className, classDescription: selectedConfigTable.classDescription, classAliases: selectedConfigTable.classAliases, annotationStatus: getTableAnnotationStatus(selectedConfigTable) };
+    const nextTable = settleTableAnnotationStatus({ ...selectedConfigTable, ...value });
+    setTables((current) => current.map((table) => table.tableName === nextTable.tableName ? nextTable : table));
+    addChanges([{ action: "update_class_name", label: `更新 ${selectedConfigTable.tableName} 的类信息`, tableName: selectedConfigTable.tableName, tableSnapshot: makeTableAuditSnapshot(nextTable), before, after: { ...value, annotationStatus: getTableAnnotationStatus(nextTable) } }]);
     setTableConfigTarget(null);
     setTableConfigError("");
     toast.success("类信息已保存");
@@ -1669,19 +1719,21 @@ export default function Home() {
     if (!table) throw new Error(`表 ${draft.tableName} 已不存在，无法应用草稿`);
     const duplicate = tables.find((item) => item.tableName !== table.tableName && item.className.toLowerCase() === draft.className.trim().toLowerCase());
     if (duplicate) throw new Error(`类名 ${draft.className} 已被 ${duplicate.tableName} 使用`);
-    const next = mergeAiDraftIntoTable(table, draft);
+    const next = { ...mergeAiDraftIntoTable(table, draft), annotationStatus: "completed" as const };
     const validationErrors = validateExportConfiguration([next]);
     if (validationErrors.length) throw new Error(`审核草稿仍有必填项未完成：${validationErrors.slice(0, 3).join("；")}`);
     const before = {
       className: table.className,
       classDescription: table.classDescription,
       classAliases: table.classAliases,
+      annotationStatus: getTableAnnotationStatus(table),
       annotations: Object.fromEntries(table.columns.map((column) => [column.name, migrateColumn(column).annotation])),
     };
     const after = {
       className: next.className,
       classDescription: next.classDescription,
       classAliases: next.classAliases,
+      annotationStatus: "completed",
       annotations: Object.fromEntries(next.columns.map((column) => [column.name, migrateColumn(column).annotation])),
     };
     setTables((current) => current.map((item) => item.tableName === next.tableName ? next : item));
@@ -1695,6 +1747,33 @@ export default function Home() {
       before,
       after,
     }]);
+  };
+
+  const markAnnotationsInProgress = (tableNames: string[]) => {
+    const targets = new Set(tableNames);
+    if (targets.size === 0) return;
+    setTables((current) => current.map((table) => targets.has(table.tableName)
+      ? { ...table, annotationStatus: "in_progress" }
+      : table));
+  };
+
+  const resetAnnotations = () => {
+    if (!annotationResetTarget) return;
+    const table = tables.find((item) => item.tableName === annotationResetTarget);
+    if (!table) return setAnnotationResetTarget(null);
+    const occupiedClassNames = tables.filter((item) => item.tableName !== table.tableName).map((item) => item.className);
+    const reset = resetTableAnnotations(table, occupiedClassNames);
+    setTables((current) => current.map((item) => item.tableName === reset.tableName ? reset : item));
+    addChanges([{
+      action: "reset_annotations",
+      label: `清空表 ${table.tableName} 的全部标注`,
+      tableName: table.tableName,
+      tableSnapshot: makeTableAuditSnapshot(reset),
+      before: table,
+      after: reset,
+    }]);
+    setAnnotationResetTarget(null);
+    toast.success(`已清空 ${table.tableName} 的标注`, { description: "原始字段、域、外键和 Claude Code Session 均已保留，可从本表变更记录恢复。" });
   };
 
   const renameDomain = (newName: string) => {
@@ -1794,9 +1873,10 @@ export default function Home() {
   const deleteFieldRelations = fieldDeleteTarget ? relationships.filter((relationship) => relationship.columnMapping.some((mapping) =>
     (relationship.parentTable === fieldDeleteTarget.tableName && mapping.parentColumn === fieldDeleteTarget.fieldName)
     || (relationship.childTable === fieldDeleteTarget.tableName && mapping.childColumn === fieldDeleteTarget.fieldName))).length : 0;
+  const annotationResetTable = annotationResetTarget ? tables.find((table) => table.tableName === annotationResetTarget) : undefined;
 
   if (aiOpen) return <>
-    <AiPanel open onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onApplyDraft={applyAiDraft} />
+    <AiPanel open onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onAnnotationStarted={markAnnotationsInProgress} onApplyDraft={applyAiDraft} />
     <Toaster position="bottom-right" />
   </>;
 
@@ -1825,6 +1905,11 @@ export default function Home() {
         </div>
         <div className="workspace-actions">
           <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域{fieldGapCount > 0 && <><span /><strong className="quality-alert"><CircleAlert size={12} />{fieldGapCount} 字段缺口</strong></>}</div>
+          <div className="annotation-overview" aria-label="表标注状态汇总">
+            <strong className="completed">{annotationCounts.completed} 完整</strong>
+            <strong className="in_progress">{annotationCounts.in_progress} 标注中</strong>
+            <strong className="unannotated">{annotationCounts.unannotated} 未标注</strong>
+          </div>
           <Button variant="outline" className="ai-toolbar-button" onClick={() => { setAiTableTarget(null); setAiOpen(true); }}><Sparkles size={16} />AI 标注</Button>
           <Button variant="outline" onClick={exportAnnotations}><FileArchive size={16} />导出标注</Button>
           <Button onClick={() => setImportOpen(true)}><Plus size={16} />导入 JSON</Button>
@@ -1857,12 +1942,29 @@ export default function Home() {
       onRequestDeleteField={(tableName, fieldName) => setFieldDeleteTarget({ tableName, fieldName })}
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
       onOpenAi={(tableName) => { setInspector(null); setAiTableTarget(tableName); setAiOpen(true); }}
+      onResetAnnotations={setAnnotationResetTarget}
       onExportChanges={exportTableAudit}
       onRestoreChange={setRestoreTarget}
     />
     <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
     <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
       <AlertDialogContent className="delete-dialog"><AlertDialogHeader><div className="delete-dialog-mark"><Trash2 size={20} /></div><AlertDialogTitle>删除字段 {fieldDeleteTarget?.fieldName}？</AlertDialogTitle><AlertDialogDescription>该字段会从 {fieldDeleteTarget?.tableName} 移除，并清理 {deleteFieldRelations} 条关系中的对应列映射。删除前内容会写入变更记录。</AlertDialogDescription></AlertDialogHeader><div className="delete-table-preview"><code>{fieldDeleteTarget?.tableName}.{fieldDeleteTarget?.fieldName}</code><span>{deleteFieldColumn?.description || "暂无字段说明"}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setFieldDeleteTarget(null)}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={deleteField}><Trash2 size={14} />确认删除字段</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+    </AlertDialog>
+    <AlertDialog open={Boolean(annotationResetTarget && annotationResetTable)} onOpenChange={(open) => { if (!open) setAnnotationResetTarget(null); }}>
+      <AlertDialogContent className="reset-annotations-dialog">
+        <AlertDialogHeader>
+          <div className="reset-dialog-mark"><RotateCcw size={20} /></div>
+          <AlertDialogTitle>清空表 {annotationResetTable?.tableName} 的全部标注？</AlertDialogTitle>
+          <AlertDialogDescription>类名、类说明、类别名和全部字段标注将恢复到刚导入时的默认状态。原始表结构、导入字段说明、域、外键关系及 Claude Code Session 不会删除。</AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="reset-annotations-preview">
+          <div><span>当前状态</span>{annotationResetTable && <AnnotationStatusPill table={annotationResetTable} />}</div>
+          <div><span>对应类</span><code>{annotationResetTable?.className}</code></div>
+          <div><span>涉及字段</span><strong>{annotationResetTable?.columns.length ?? 0}</strong></div>
+        </div>
+        <p className="reset-annotations-note">本次清空会写入该表的变更记录，之后可以在表详情的“变更”页签中恢复。</p>
+        <AlertDialogFooter><AlertDialogCancel onClick={() => setAnnotationResetTarget(null)}>取消</AlertDialogCancel><AlertDialogAction className="reset-annotations-confirm" onClick={resetAnnotations}><RotateCcw size={14} />确认清空标注</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
     </AlertDialog>
     <AlertDialog open={Boolean(restoreTarget)} onOpenChange={(open) => { if (!open) setRestoreTarget(null); }}>
       <AlertDialogContent className="restore-dialog"><AlertDialogHeader><div className="restore-dialog-mark"><RotateCcw size={20} /></div><AlertDialogTitle>恢复到这次变更之前？</AlertDialogTitle><AlertDialogDescription>将恢复“{restoreTarget?.label}”发生前与 {restoreTarget?.tableName} 相关的内容。较新的同表编辑可能被覆盖；本次恢复也会生成一条新的可恢复记录。</AlertDialogDescription></AlertDialogHeader><div className="restore-change-preview"><code>{restoreTarget?.tableName}{restoreTarget?.fieldName ? `.${restoreTarget.fieldName}` : ""}</code><span>{restoreTarget ? new Date(restoreTarget.timestamp).toLocaleString("zh-CN", { hour12: false }) : ""}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setRestoreTarget(null)}>取消</AlertDialogCancel><AlertDialogAction onClick={restoreChange}><RotateCcw size={14} />确认恢复</AlertDialogAction></AlertDialogFooter></AlertDialogContent>

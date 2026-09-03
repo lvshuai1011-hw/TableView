@@ -6,6 +6,7 @@ import {
   Relationship,
   ROOT_FOLDER,
   SchemaTable,
+  TableAnnotationStatus,
   UNCLASSIFIED,
 } from "./data";
 
@@ -102,6 +103,68 @@ export function migrateColumn(column: Column): Column {
   };
 }
 
+const TABLE_ANNOTATION_STATUSES = new Set<TableAnnotationStatus>(["unannotated", "in_progress", "completed"]);
+
+function annotationStatusValue(value: unknown): TableAnnotationStatus | undefined {
+  return typeof value === "string" && TABLE_ANNOTATION_STATUSES.has(value as TableAnnotationStatus)
+    ? value as TableAnnotationStatus
+    : undefined;
+}
+
+export function hasTableAnnotationContent(table: SchemaTable) {
+  if (table.className.trim() && table.className.trim() !== defaultClassName(table.tableName)) return true;
+  if (table.classAliases.length > 0) return true;
+  if (table.classDescription.trim() && table.classDescription.trim() !== table.description.trim()) return true;
+  return table.columns.some((column) => {
+    const annotation = migrateColumn(column).annotation!;
+    const defaults = createDefaultAnnotation(column);
+    return annotation.included !== defaults.included
+      || annotation.entityColumn !== defaults.entityColumn
+      || annotation.aliases.length > 0
+      || Boolean(annotation.detailedDescription.trim())
+      || annotation.isLocalId
+      || annotation.isDisplayName
+      || annotation.isSemantic
+      || annotation.isCode
+      || annotation.enumValues.length > 0
+      || Boolean(annotation.enumRef)
+      || Boolean(annotation.enumDescription);
+  });
+}
+
+export function getTableAnnotationStatus(table: SchemaTable): TableAnnotationStatus {
+  const explicit = annotationStatusValue(table.annotationStatus);
+  if (explicit === "unannotated") return "unannotated";
+  const hasContent = hasTableAnnotationContent(table);
+  if (explicit === "in_progress") return "in_progress";
+  if (validateExportConfiguration([table]).length === 0 && (explicit === "completed" || hasContent)) return "completed";
+  if (explicit === "completed" || hasContent) return "in_progress";
+  return "unannotated";
+}
+
+export function settleTableAnnotationStatus(table: SchemaTable): SchemaTable {
+  return {
+    ...table,
+    annotationStatus: validateExportConfiguration([table]).length === 0 ? "completed" : "in_progress",
+  };
+}
+
+export function resetTableAnnotations(table: SchemaTable, occupiedClassNames: Iterable<string> = []): SchemaTable {
+  const usedNames = new Set([...occupiedClassNames].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  const base = defaultClassName(table.tableName);
+  let className = base;
+  let suffix = 2;
+  while (usedNames.has(className.toLowerCase())) className = `${base}${suffix++}`;
+  return {
+    ...table,
+    className,
+    classDescription: table.description,
+    classAliases: [],
+    annotationStatus: "unannotated",
+    columns: table.columns.map((column) => ({ ...column, annotation: createDefaultAnnotation(column) })),
+  };
+}
+
 export function migrateTables(input: SchemaTable[]) {
   const used = new Set<string>();
   return input.map((table) => {
@@ -113,7 +176,7 @@ export function migrateTables(input: SchemaTable[]) {
     while (used.has(className.toLowerCase())) className = `${base}${suffix++}`;
     used.add(className.toLowerCase());
     const domain1 = normalizeDomain1(table.domain1 || table.folder);
-    return {
+    const migrated: SchemaTable = {
       ...table,
       className,
       classDescription: typeof table.classDescription === "string" && table.classDescription.trim() ? table.classDescription : table.description,
@@ -125,6 +188,7 @@ export function migrateTables(input: SchemaTable[]) {
       foreignKeys: Array.isArray(table.foreignKeys) ? table.foreignKeys : [],
       referencedBy: Array.isArray(table.referencedBy) ? table.referencedBy : [],
     };
+    return { ...migrated, annotationStatus: getTableAnnotationStatus(migrated) };
   });
 }
 
@@ -136,6 +200,7 @@ export function mergeImportedTable(existing: SchemaTable | undefined, imported: 
     className: existing.className,
     classDescription: existing.classDescription,
     classAliases: existing.classAliases,
+    annotationStatus: existing.annotationStatus,
     columns: imported.columns.map((column) => migrateColumn({ ...column, annotation: annotations.get(column.name) })),
   };
 }
@@ -411,6 +476,7 @@ export type ChangeAction =
   | "delete_field"
   | "update_field"
   | "apply_ai_draft"
+  | "reset_annotations"
   | "update_class_name"
   | "update_relationship"
   | "rename_domain0"
@@ -423,6 +489,7 @@ export type TableAuditSnapshot = {
   description: string;
   domain0: string;
   domain1: string;
+  annotationStatus: TableAnnotationStatus;
 };
 
 export type ChangeRecord = {
@@ -457,6 +524,7 @@ export function makeTableAuditSnapshot(table: SchemaTable): TableAuditSnapshot {
     description: table.description,
     domain0: table.domain0,
     domain1: table.domain1,
+    annotationStatus: getTableAnnotationStatus(table),
   };
 }
 
@@ -482,6 +550,7 @@ const CHANGE_ACTIONS = new Set<ChangeAction>([
   "delete_field",
   "update_field",
   "apply_ai_draft",
+  "reset_annotations",
   "update_class_name",
   "update_relationship",
   "rename_domain0",
@@ -538,7 +607,7 @@ function restoreRelationships(table: SchemaTable, previous: Relationship[], chan
  * record does not contain enough information to recover safely.
  */
 export function restoreTableFromChange(currentTable: SchemaTable | undefined, record: ChangeRecord): SchemaTable | null | undefined {
-  if (record.action === "import_tables" || record.action === "delete_table" || record.action === "restore_change") {
+  if (record.action === "import_tables" || record.action === "delete_table" || record.action === "reset_annotations" || record.action === "restore_change") {
     if (!Object.prototype.hasOwnProperty.call(record, "before")) return undefined;
     if (record.before === null) return null;
     return schemaTableFromUnknown(record.before, record.tableName);
@@ -546,13 +615,17 @@ export function restoreTableFromChange(currentTable: SchemaTable | undefined, re
   if (!currentTable) return undefined;
 
   if (record.action === "update_field") {
-    if (!record.fieldName || !objectValue(record.before) || !currentTable.columns.some((column) => column.name === record.fieldName)) return undefined;
-    return {
+    const before = objectValue(record.before);
+    const annotation = objectValue(before?.annotation) ?? before;
+    if (!record.fieldName || !annotation || !currentTable.columns.some((column) => column.name === record.fieldName)) return undefined;
+    const restored = {
       ...currentTable,
       columns: currentTable.columns.map((column) => column.name === record.fieldName
-        ? migrateColumn({ ...column, annotation: record.before as ColumnAnnotation })
+        ? migrateColumn({ ...column, annotation: annotation as ColumnAnnotation })
         : column),
     };
+    const previousStatus = annotationStatusValue(before?.annotationStatus);
+    return { ...restored, annotationStatus: previousStatus ?? getTableAnnotationStatus({ ...restored, annotationStatus: undefined }) };
   }
 
   if (record.action === "delete_field") {
@@ -565,7 +638,9 @@ export function restoreTableFromChange(currentTable: SchemaTable | undefined, re
       : columns.length;
     columns.splice(index, 0, migrateColumn(column));
     const previousRelationships = relationshipsFromUnknown(before?.relationships) ?? [];
-    return restoreRelationships({ ...currentTable, columns }, previousRelationships);
+    const restored = restoreRelationships({ ...currentTable, columns }, previousRelationships);
+    const previousStatus = annotationStatusValue(before?.annotationStatus);
+    return { ...restored, annotationStatus: previousStatus ?? getTableAnnotationStatus({ ...restored, annotationStatus: undefined }) };
   }
 
   if (record.action === "apply_ai_draft") {
@@ -577,6 +652,7 @@ export function restoreTableFromChange(currentTable: SchemaTable | undefined, re
       className: typeof before.className === "string" ? before.className : currentTable.className,
       classDescription: typeof before.classDescription === "string" ? before.classDescription : currentTable.classDescription,
       classAliases: stringArray(before.classAliases),
+      annotationStatus: annotationStatusValue(before.annotationStatus) ?? "in_progress",
       columns: currentTable.columns.map((column) => Object.prototype.hasOwnProperty.call(annotations, column.name)
         ? migrateColumn({ ...column, annotation: annotations[column.name] as ColumnAnnotation })
         : column),
@@ -586,11 +662,15 @@ export function restoreTableFromChange(currentTable: SchemaTable | undefined, re
   if (record.action === "update_class_name") {
     const before = objectValue(record.before);
     if (!before) return undefined;
-    return {
+    const restored = {
       ...currentTable,
       className: typeof before.className === "string" ? before.className : currentTable.className,
       classDescription: typeof before.classDescription === "string" ? before.classDescription : currentTable.classDescription,
       classAliases: stringArray(before.classAliases),
+    };
+    return {
+      ...restored,
+      annotationStatus: annotationStatusValue(before.annotationStatus) ?? getTableAnnotationStatus({ ...restored, annotationStatus: undefined }),
     };
   }
 
@@ -637,6 +717,7 @@ function snapshotFromUnknown(value: unknown, tableName: string): TableAuditSnaps
     description: typeof source.description === "string" ? source.description : "",
     domain0: typeof source.domain0 === "string" ? source.domain0 : "",
     domain1: typeof source.domain1 === "string" ? source.domain1 : "",
+    annotationStatus: annotationStatusValue(source.annotationStatus) ?? "unannotated",
   };
 }
 

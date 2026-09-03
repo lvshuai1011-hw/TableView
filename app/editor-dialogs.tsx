@@ -230,6 +230,7 @@ function actionLabel(action: ChangeRecord["action"]) {
     delete_field: "删除字段",
     update_field: "更新字段标注",
     apply_ai_draft: "应用审核草稿",
+    reset_annotations: "清空表标注",
     update_class_name: "更新类信息",
     update_relationship: "更新外键关系",
     rename_domain0: "修改 0级域",

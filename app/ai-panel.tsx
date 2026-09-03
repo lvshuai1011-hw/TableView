@@ -219,7 +219,7 @@ function SessionListItem({ session, active, selected, onClick, onSelectedChange 
   </div>;
 }
 
-export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTableName, onReviewTable, onApplyDraft }: AiPanelProps) {
+export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTableName, onReviewTable, onAnnotationStarted, onApplyDraft }: AiPanelProps) {
   const [tab, setTab] = useState("work");
   const [health, setHealth] = useState<AiHealth | null>(null);
   const [connectionError, setConnectionError] = useState("");
@@ -454,6 +454,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     setActivity(targetSession ? "正在恢复 Claude Code Session…" : "正在启动 Claude Code…");
     try {
       const currentDataset = await syncDataset();
+      onAnnotationStarted([targetTable.tableName]);
       clearMessage();
       await streamChat({
         table: targetTable,
@@ -496,6 +497,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
           scope: batchDomain === "__all__" ? { level: "global" } : { level: "domain", domain0: batchDomain },
         }),
       });
+      onAnnotationStarted(selectedTables.map((table) => table.tableName));
       setJobs((current) => [value.job, ...current.filter((job) => job.id !== value.job.id)]);
       toast.success("全量标注任务已启动", { description: `将依次处理 ${selectedTables.length} 张表。` });
     } catch (error) {
@@ -564,6 +566,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     try {
       const currentDataset = await syncDataset();
       const currentTable = tables.find((table) => table.tableName === todo.tableName);
+      if (currentTable) onAnnotationStarted([currentTable.tableName]);
       await api(`/api/ai/todos/${todo.id}/answer`, {
         method: "POST",
         body: JSON.stringify({ answer, table: currentTable, datasetId: currentDataset.id, promptTemplate }),
