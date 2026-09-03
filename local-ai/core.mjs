@@ -1,20 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const SEMANTIC_ROLES = new Set([
-  "identifier",
-  "name",
-  "time",
-  "amount",
-  "quantity",
-  "status",
-  "code",
-  "description",
-  "other",
-]);
-const SENSITIVITIES = new Set(["none", "internal", "sensitive", "restricted"]);
 const CONFIDENCE_LEVELS = new Set(["high", "medium", "low"]);
 
 function stringValue(value, fallback = "") {
@@ -50,19 +38,6 @@ function defaultClassName(tableName) {
   return toPascalCase(parts.join("_")) || "UnnamedEntity";
 }
 
-function defaultSemanticRole(columnName) {
-  const name = String(columnName ?? "").toUpperCase();
-  if (/(^|_)ID$/.test(name) || /_ID_/.test(name)) return "identifier";
-  if (/(^|_)NAME$/.test(name)) return "name";
-  if (/(DATE|TIME|TIMESTAMP)$/.test(name)) return "time";
-  if (/(AMOUNT|BALANCE|PRICE|FEE|COST)$/.test(name)) return "amount";
-  if (/(COUNT|NUM|NUMBER|QTY|QUANTITY|TIMES)$/.test(name)) return "quantity";
-  if (/(STATUS|STATE|FLAG)$/.test(name)) return "status";
-  if (/(TYPE|CODE)$/.test(name)) return "code";
-  if (/(DESC|DESCRIPTION|REMARK|COMMENT)$/.test(name)) return "description";
-  return "other";
-}
-
 function currentAnnotation(column) {
   const source = column?.annotation && typeof column.annotation === "object" ? column.annotation : {};
   return {
@@ -74,12 +49,7 @@ function currentAnnotation(column) {
     isDisplayName: boolValue(source.isDisplayName),
     isSemantic: boolValue(source.isSemantic),
     isCode: boolValue(source.isCode),
-    semanticRole: SEMANTIC_ROLES.has(source.semanticRole) ? source.semanticRole : defaultSemanticRole(column?.name),
-    tags: stringArray(source.tags),
-    unit: stringValue(source.unit),
     enumValues: normalizeEnumValues(source.enumValues),
-    valueRange: stringValue(source.valueRange),
-    sensitivity: SENSITIVITIES.has(source.sensitivity) ? source.sensitivity : "none",
     enumRef: stringValue(source.enumRef),
     enumDescription: stringValue(source.enumDescription),
   };
@@ -111,8 +81,12 @@ export const annotationOutputSchema = {
       properties: {
         tableName: { type: "string" },
         className: { type: "string" },
-        classDescription: { type: "string" },
-        classAliases: { type: "array", items: { type: "string" } },
+        classDescription: {
+          type: "string",
+          minLength: 160,
+          pattern: "中文描述[：:][\\s\\S]+English Description[：:][\\s\\S]+",
+        },
+        classAliases: { type: "array", minItems: 4, maxItems: 12, uniqueItems: true, items: { type: "string", minLength: 1 } },
         confidence: { type: "string", enum: ["high", "medium", "low"] },
         columns: {
           type: "array",
@@ -121,23 +95,23 @@ export const annotationOutputSchema = {
             additionalProperties: false,
             required: [
               "name", "included", "entityColumn", "aliases", "detailedDescription",
-              "isLocalId", "isDisplayName", "isSemantic", "isCode", "semanticRole",
-              "tags", "unit", "enumValues", "valueRange", "sensitivity", "enumRef",
+              "isLocalId", "isDisplayName", "isSemantic", "isCode", "enumValues", "enumRef",
               "enumDescription", "confidence", "reason",
             ],
             properties: {
               name: { type: "string" },
               included: { type: "boolean" },
               entityColumn: { type: "string" },
-              aliases: { type: "array", items: { type: "string" } },
-              detailedDescription: { type: "string" },
+              aliases: { type: "array", minItems: 2, maxItems: 8, uniqueItems: true, items: { type: "string", minLength: 1 } },
+              detailedDescription: {
+                type: "string",
+                minLength: 120,
+                pattern: "中文描述[：:][\\s\\S]+English Description[：:][\\s\\S]+",
+              },
               isLocalId: { type: "boolean" },
               isDisplayName: { type: "boolean" },
               isSemantic: { type: "boolean" },
               isCode: { type: "boolean" },
-              semanticRole: { type: "string", enum: [...SEMANTIC_ROLES] },
-              tags: { type: "array", items: { type: "string" } },
-              unit: { type: "string" },
               enumValues: {
                 type: "array",
                 items: {
@@ -152,8 +126,6 @@ export const annotationOutputSchema = {
                   },
                 },
               },
-              valueRange: { type: "string" },
-              sensitivity: { type: "string", enum: [...SENSITIVITIES] },
               enumRef: { type: "string" },
               enumDescription: { type: "string" },
               confidence: { type: "string", enum: ["high", "medium", "low"] },
@@ -196,12 +168,7 @@ function normalizeColumnDraft(value, column) {
     isDisplayName: boolValue(source.isDisplayName, fallback.isDisplayName),
     isSemantic: boolValue(source.isSemantic, fallback.isSemantic),
     isCode: boolValue(source.isCode, fallback.isCode),
-    semanticRole: SEMANTIC_ROLES.has(source.semanticRole) ? source.semanticRole : fallback.semanticRole,
-    tags: stringArray(source.tags),
-    unit: stringValue(source.unit, fallback.unit),
     enumValues: normalizeEnumValues(source.enumValues),
-    valueRange: stringValue(source.valueRange, fallback.valueRange),
-    sensitivity: SENSITIVITIES.has(source.sensitivity) ? source.sensitivity : fallback.sensitivity,
     enumRef: stringValue(source.enumRef, fallback.enumRef),
     enumDescription: stringValue(source.enumDescription, fallback.enumDescription),
     confidence: CONFIDENCE_LEVELS.has(source.confidence) ? source.confidence : "medium",
@@ -353,6 +320,69 @@ export function describeStreamEvent(event) {
   const tool = content.find((block) => block?.type === "tool_use");
   if (tool) return `正在使用 ${stringValue(tool.name, "工具")} 检查资料`;
   return undefined;
+}
+
+function traceDetail(value, limit = 12_000) {
+  let text;
+  if (typeof value === "string") text = value;
+  else {
+    try { text = JSON.stringify(value, null, 2); }
+    catch { text = String(value ?? ""); }
+  }
+  const normalized = String(text ?? "").trim();
+  return normalized.length > limit ? `${normalized.slice(0, limit)}\n…内容过长，已截断显示` : normalized;
+}
+
+function resultMetadata(event) {
+  const copy = { ...event };
+  delete copy.structured_output;
+  if (copy.result && typeof copy.result === "object") delete copy.result;
+  return copy;
+}
+
+export function buildSessionTrace(records) {
+  const tools = new Map();
+  return records.flatMap((record, recordIndex) => {
+    const event = record?.event && typeof record.event === "object" ? record.event : {};
+    const at = stringValue(record?.at, new Date(0).toISOString());
+    const entries = [];
+    const push = (kind, label, detail = "") => entries.push({
+      id: `${recordIndex}-${entries.length}`,
+      kind,
+      label,
+      detail: traceDetail(detail),
+      at,
+    });
+
+    if (event.type === "system" && event.subtype === "init") {
+      push("system", "Claude Code 会话初始化", resultMetadata(event));
+      return entries;
+    }
+
+    const content = Array.isArray(event.message?.content) ? event.message.content : [];
+    content.forEach((block) => {
+      if (!block || typeof block !== "object") return;
+      if (block.type === "text" && stringValue(block.text)) {
+        push("assistant", "Claude Code 中间说明", block.text);
+      } else if (block.type === "tool_use") {
+        const name = stringValue(block.name, "工具");
+        if (block.id) tools.set(block.id, name);
+        push("tool_use", `调用 ${name}`, block.input ?? {});
+      } else if (block.type === "tool_result") {
+        const name = tools.get(block.tool_use_id) || "工具";
+        push(block.is_error ? "error" : "tool_result", `${name} ${block.is_error ? "执行失败" : "返回结果"}`, block.content ?? "");
+      }
+    });
+
+    if (event.type === "result") {
+      push(event.is_error ? "error" : "result", event.is_error ? "本轮执行失败" : "本轮执行完成", resultMetadata(event));
+    } else if (event.type === "unparsed") {
+      push("raw", "未解析的 Claude Code 输出", event.text ?? event);
+    } else if (entries.length === 0 && !["assistant", "user"].includes(event.type)) {
+      push("raw", `Claude Code 事件 · ${stringValue(event.type, "unknown")}`, event);
+    }
+    return entries;
+  });
 }
 
 function isWithinRoot(candidate, root) {
@@ -708,6 +738,32 @@ export class AtlasStore {
     const filePath = this.transcriptPath(id);
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, `${JSON.stringify({ at: new Date().toISOString(), event })}\n`, { encoding: "utf8", flag: "a" });
+  }
+
+  async readSessionTrace(id) {
+    let content = "";
+    try { content = await readFile(this.transcriptPath(id), "utf8"); }
+    catch { return []; }
+    const records = content.split("\n").flatMap((line) => {
+      if (!line.trim()) return [];
+      try { return [JSON.parse(line)]; }
+      catch { return [{ at: new Date(0).toISOString(), event: { type: "unparsed", text: line } }]; }
+    });
+    return buildSessionTrace(records);
+  }
+
+  async deleteSessions(values) {
+    const ids = [...new Set((Array.isArray(values) ? values : []).map(safeId))];
+    return this.serialize(async () => {
+      await Promise.all(ids.flatMap((id) => [
+        rm(this.sessionPath(id), { force: true }),
+        rm(this.transcriptPath(id), { force: true }),
+        rm(this.workspacePath(id), { recursive: true, force: true }),
+      ]));
+      const index = await this.readJson(this.sessionIndexPath, []);
+      await this.atomicWrite(this.sessionIndexPath, index.filter((item) => !ids.includes(item.id)));
+      return ids;
+    });
   }
 
   async listJobs() { return this.readJson(this.jobIndexPath, []); }

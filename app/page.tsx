@@ -762,6 +762,8 @@ function AppSidebar({
     : [];
   const availableTableNames = new Set(tables.map((table) => table.tableName));
   const selectedTableNames = [...selectedTables].filter((tableName) => availableTableNames.has(tableName));
+  const filteredTableNames = filteredTables.map((table) => table.tableName);
+  const allFilteredSelected = filteredTableNames.length > 0 && filteredTableNames.every((tableName) => selectedTables.has(tableName));
 
   const toggleDomain = (domain0: string) => setExpandedDomains((current) => {
     const next = new Set(current);
@@ -776,6 +778,12 @@ function AppSidebar({
   const toggleSelectedTable = (tableName: string) => setSelectedTables((current) => {
     const next = new Set(current);
     if (next.has(tableName)) next.delete(tableName); else next.add(tableName);
+    return next;
+  });
+  const toggleAllFilteredTables = () => setSelectedTables((current) => {
+    const next = new Set(current);
+    if (allFilteredSelected) filteredTableNames.forEach((tableName) => next.delete(tableName));
+    else filteredTableNames.forEach((tableName) => next.add(tableName));
     return next;
   });
   const finishManaging = () => {
@@ -859,7 +867,7 @@ function AppSidebar({
         </TabsContent>
         <TabsContent value="flat" className="flat-catalog">
           <div className="flat-heading"><span>全部表铺平</span><div><em>{filteredTables.length}/{tables.length}</em><button onClick={() => managingTables ? finishManaging() : setManagingTables(true)}>{managingTables ? "完成" : "管理"}</button></div></div>
-          {managingTables && <div className="bulk-delete-bar"><span>已选 {selectedTableNames.length} 张</span><button disabled={selectedTableNames.length === 0} onClick={requestBulkDelete}><Trash2 size={12} />批量删除</button></div>}
+          {managingTables && <div className="bulk-delete-bar"><button className="bulk-select" disabled={filteredTableNames.length === 0} onClick={toggleAllFilteredTables}>{allFilteredSelected ? "取消全选" : "全选当前"}</button><span>已选 {selectedTableNames.length} 张</span><button className="bulk-delete-action" disabled={selectedTableNames.length === 0} onClick={requestBulkDelete}><Trash2 size={12} />批量删除</button></div>}
           {filteredTables.map((table) => <div key={table.tableName} className={`flat-table-row ${scope.level === "focus" && scope.tableName === table.tableName ? "active" : ""}`}>
             {managingTables && <input type="checkbox" checked={selectedTables.has(table.tableName)} onChange={() => toggleSelectedTable(table.tableName)} aria-label={`选择 ${table.tableName}`} />}
             <button className="flat-table-open" onClick={() => managingTables ? toggleSelectedTable(table.tableName) : onScope({ level: "focus", tableName: table.tableName })}>
@@ -1176,6 +1184,7 @@ function InspectorSheet({
   onFocus,
   onDelete,
   onEditField,
+  onRequestDeleteField,
   onEditTable,
   onOpenAi,
   onExportChanges,
@@ -1189,6 +1198,7 @@ function InspectorSheet({
   onFocus: (tableName: string) => void;
   onDelete: (tableName: string) => void;
   onEditField: (tableName: string, fieldName: string) => void;
+  onRequestDeleteField: (tableName: string, fieldName: string) => void;
   onEditTable: (tableName: string) => void;
   onOpenAi: (tableName: string) => void;
   onExportChanges: (tableName: string) => void;
@@ -1205,14 +1215,16 @@ function InspectorSheet({
   const outbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.childTable === selectedTable.tableName) : [];
   const inbound = selectedTable ? relationships.filter((relation) => !isSelfRelationship(relation) && relation.parentTable === selectedTable.tableName) : [];
   const tableChanges = selectedTable ? getTableChangeRecords(changeHistory, selectedTable.tableName) : [];
+  const hasImportedFieldInfo = selectedTable?.columns.some((column) => Boolean(column.description || column.remark)) ?? false;
   const title = inspector?.kind === "table" ? tableName : inspector?.kind === "relations" ? inspector.title : selectedGroup?.label ?? "关系详情";
+  const inspectorDescription = selectedTable?.description || (selectedGroup?.caption ?? "");
 
   return <Sheet open={Boolean(inspector)} onOpenChange={(open) => { if (!open) onClose(); }}>
-    <SheetContent className="inspector-sheet">
+    <SheetContent className={`inspector-sheet ${inspector?.kind === "table" ? "is-table-fullscreen" : ""}`}>
       <SheetHeader>
         <div className="inspector-eyebrow">{inspector?.kind === "table" ? <Table2 size={14} /> : inspector?.kind === "relations" ? <GitBranch size={14} /> : <Layers3 size={14} />}{inspector?.kind === "table" ? "表详情" : inspector?.kind === "relations" ? "关系详情" : "聚合节点"}</div>
         <SheetTitle>{title}</SheetTitle>
-        <SheetDescription>{selectedTable?.description || (selectedTable ? [selectedTable.domain0, selectedTable.domain1].filter(Boolean).join(" / ") : selectedGroup?.caption || "从关系定义中读取")}</SheetDescription>
+        {inspectorDescription && <SheetDescription>{inspectorDescription}</SheetDescription>}
       </SheetHeader>
       {inspector?.kind === "table" && !selectedTable && <div className="ghost-inspector">
         <CircleAlert size={28} /><strong>该表尚未导入</strong><p>它来自其他表的外键关系。导入对应 JSON 后，字段、域和更多上下游关系会自动补齐。</p><code>{tableName}</code>
@@ -1230,7 +1242,7 @@ function InspectorSheet({
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
         </div>
         <Tabs defaultValue="relations" className="inspector-tabs">
-          <TabsList><TabsTrigger value="relations">上下游</TabsTrigger><TabsTrigger value="fields">字段</TabsTrigger><TabsTrigger value="remarks">备注</TabsTrigger><TabsTrigger value="changes">变更 <span>{tableChanges.length}</span></TabsTrigger></TabsList>
+          <TabsList><TabsTrigger value="relations">上下游</TabsTrigger><TabsTrigger value="fields">字段</TabsTrigger><TabsTrigger value="changes">变更 <span>{tableChanges.length}</span></TabsTrigger></TabsList>
           <TabsContent value="relations" className="inspector-relations">
             {outbound.length > 0 && <section><h3>我依赖谁 <span>{outbound.length}</span></h3>{outbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
             {inbound.length > 0 && <section><h3>谁依赖我 <span>{inbound.length}</span></h3>{inbound.map((relation) => <RelationDetail key={relationKey(relation)} relationship={relation} tableIndex={tableIndex} />)}</section>}
@@ -1238,12 +1250,11 @@ function InspectorSheet({
             {outbound.length + inbound.length + selfRelations.length === 0 && <div className="inspector-empty">暂无外键关系</div>}
           </TabsContent>
           <TabsContent value="fields" className="field-table-wrap">
-            <Table><TableHeader><TableRow><TableHead>字段 / 属性</TableHead><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead className="field-actions-head">操作</TableHead></TableRow></TableHeader><TableBody>{selectedTable.columns.map((column) => {
+            <Table><TableHeader><TableRow><TableHead>字段 / 属性</TableHead>{hasImportedFieldInfo && <TableHead>导入 JSON 字段信息</TableHead>}<TableHead>标注后的业务语义</TableHead><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead className="field-actions-head">操作</TableHead></TableRow></TableHeader><TableBody>{selectedTable.columns.map((column) => {
               const annotation = migrateColumn(column).annotation!;
-              return <TableRow key={column.name} className={!annotation.included ? "field-excluded" : ""}><TableCell><div className="field-name">{column.isPrimaryKey ? <KeyRound size={13} /> : <Minus size={11} />}<div><code>{column.name}</code><small>{annotation.entityColumn} · {column.description || "未填写字段描述"}</small></div></div></TableCell><TableCell><code>{column.dataType}</code></TableCell><TableCell><div className="field-state"><span>{column.isPrimaryKey ? "PK" : column.nullable ? "可空" : "必填"}</span>{!annotation.included && <Badge variant="outline">不导出</Badge>}{annotation.isLocalId && <Badge variant="outline">LOCAL ID</Badge>}{annotation.isCode && <Badge variant="outline">CODE</Badge>}{annotation.enumRef && <Badge variant="outline">枚举</Badge>}</div></TableCell><TableCell><div className="field-row-actions"><button onClick={() => onEditField(selectedTable.tableName, column.name)} aria-label={`标注 ${column.name}`}><FilePenLine size={13} /></button><button className="danger" onClick={() => onEditField(selectedTable.tableName, column.name)} aria-label={`删除 ${column.name}`} title="进入字段标注后删除"><Trash2 size={13} /></button></div></TableCell></TableRow>;
+              return <TableRow key={column.name} className={!annotation.included ? "field-excluded" : ""}><TableCell><div className="field-name">{column.isPrimaryKey ? <KeyRound size={13} /> : <Minus size={11} />}<div><code>{column.name}</code>{annotation.entityColumn && <small>{annotation.entityColumn}</small>}</div></div></TableCell>{hasImportedFieldInfo && <TableCell><div className="field-source-copy">{column.description && <div><small>description</small><strong>{column.description}</strong></div>}{column.remark && <div><small>remark</small><p>{column.remark}</p></div>}</div></TableCell>}<TableCell><div className="field-annotation-copy">{annotation.detailedDescription && <p>{annotation.detailedDescription}</p>}{annotation.aliases.length > 0 && <div>{annotation.aliases.map((alias) => <span key={alias}>{alias}</span>)}</div>}</div></TableCell><TableCell><code>{column.dataType}</code></TableCell><TableCell><div className="field-state"><span>{column.isPrimaryKey ? "PK" : column.nullable ? "可空" : "必填"}</span>{!annotation.included && <Badge variant="outline">不导出</Badge>}{annotation.isLocalId && <Badge variant="outline">LOCAL ID</Badge>}{annotation.isCode && <Badge variant="outline">CODE</Badge>}{annotation.enumRef && <Badge variant="outline">枚举 · {annotation.enumRef}</Badge>}</div></TableCell><TableCell><div className="field-row-actions"><button onClick={() => onEditField(selectedTable.tableName, column.name)} aria-label={`标注 ${column.name}`}><FilePenLine size={13} /></button><button className="danger" onClick={() => onRequestDeleteField(selectedTable.tableName, column.name)} aria-label={`删除 ${column.name}`} title="删除字段"><Trash2 size={13} /></button></div></TableCell></TableRow>;
             })}</TableBody></Table>
           </TabsContent>
-          <TabsContent value="remarks" className="remark-stack">{selectedTable.columns.map((column) => <article key={column.name}><code>{column.name}</code><strong>{column.description || "未填写字段描述"}</strong><p>{column.remark || "暂无详细备注"}</p></article>)}</TabsContent>
           <TabsContent value="changes" className="table-change-history">
             <div className="table-change-toolbar"><div><strong>本表历史</strong><span>导入、类配置、字段与关联外键变更</span></div><Button variant="outline" size="sm" disabled={tableChanges.length === 0} onClick={() => onExportChanges(selectedTable.tableName)}><Download size={13} />导出本表</Button></div>
             <ChangeRecordList records={tableChanges} emptyText="这张表还没有变更记录" />
@@ -1722,6 +1733,11 @@ export default function Home() {
     (relationship.parentTable === fieldDeleteTarget.tableName && mapping.parentColumn === fieldDeleteTarget.fieldName)
     || (relationship.childTable === fieldDeleteTarget.tableName && mapping.childColumn === fieldDeleteTarget.fieldName))).length : 0;
 
+  if (aiOpen) return <>
+    <AiPanel open onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onApplyDraft={applyAiDraft} />
+    <Toaster position="bottom-right" />
+  </>;
+
   return <main className={`atlas-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
     <AppSidebar
       collapsed={sidebarCollapsed}
@@ -1774,11 +1790,11 @@ export default function Home() {
       onFocus={(tableName) => enterScope({ level: "focus", tableName })}
       onDelete={(tableName) => setDeleteTargets([tableName])}
       onEditField={(tableName, fieldName) => setFieldTarget({ tableName, fieldName })}
+      onRequestDeleteField={(tableName, fieldName) => setFieldDeleteTarget({ tableName, fieldName })}
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
       onOpenAi={(tableName) => { setInspector(null); setAiTableTarget(tableName); setAiOpen(true); }}
       onExportChanges={exportTableAudit}
     />
-    <AiPanel open={aiOpen} onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onApplyDraft={applyAiDraft} />
     <DeleteTablesDialog tableNames={deleteTargets} relationships={relationships} onCancel={() => setDeleteTargets([])} onConfirm={deleteTables} />
     <AlertDialog open={Boolean(fieldDeleteTarget && deleteFieldColumn)} onOpenChange={(open) => { if (!open) setFieldDeleteTarget(null); }}>
       <AlertDialogContent className="delete-dialog"><AlertDialogHeader><div className="delete-dialog-mark"><Trash2 size={20} /></div><AlertDialogTitle>删除字段 {fieldDeleteTarget?.fieldName}？</AlertDialogTitle><AlertDialogDescription>该字段会从 {fieldDeleteTarget?.tableName} 移除，并清理 {deleteFieldRelations} 条关系中的对应列映射。删除前内容会写入变更记录。</AlertDialogDescription></AlertDialogHeader><div className="delete-table-preview"><code>{fieldDeleteTarget?.tableName}.{fieldDeleteTarget?.fieldName}</code><span>{deleteFieldColumn?.description || "暂无字段说明"}</span></div><AlertDialogFooter><AlertDialogCancel onClick={() => setFieldDeleteTarget(null)}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={deleteField}><Trash2 size={14} />确认删除字段</AlertDialogAction></AlertDialogFooter></AlertDialogContent>

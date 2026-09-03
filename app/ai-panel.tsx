@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ArrowLeft,
   Bot,
   CheckCircle2,
   CircleAlert,
@@ -17,12 +18,24 @@ import {
   Sparkles,
   Square,
   TerminalSquare,
+  Trash2,
   WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -32,13 +45,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -57,7 +63,7 @@ import type {
 } from "./ai-types";
 
 const REFERENCES_KEY = "schema-atlas.ai.reference-paths.v1";
-const PROMPT_KEY = "schema-atlas.ai.prompt-template.v2";
+const PROMPT_KEY = "schema-atlas.ai.prompt-template.v3";
 const BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
 const DEFAULT_BATCH_INSTRUCTION = DEFAULT_BATCH_INSTRUCTION_TEXT.trim();
 const DEFAULT_TABLE_INSTRUCTION = DEFAULT_TABLE_INSTRUCTION_TEXT.trim();
@@ -156,6 +162,17 @@ function SessionTranscript({ session }: { session: AiSession }) {
   </div>;
 }
 
+function SessionTrace({ session }: { session: AiSession }) {
+  const trace = session.trace ?? [];
+  return <section className="ai-trace">
+    <div className="ai-trace-heading"><div><TerminalSquare size={15} /><strong>完整执行轨迹</strong></div><Badge variant="outline">{trace.length} 项</Badge></div>
+    {trace.length > 0 ? <div className="ai-trace-list">{trace.map((item) => <details key={item.id} className={`ai-trace-item ${item.kind}`}>
+      <summary><span>{item.label}</span><time>{shortTime(item.at)}</time></summary>
+      {item.detail && <pre>{item.detail}</pre>}
+    </details>)}</div> : <p className="ai-trace-empty">这个 Session 还没有 Claude Code 流事件。</p>}
+  </section>;
+}
+
 function TodoCard({ todo, busy, onAnswer }: { todo: AiTodo; busy: boolean; onAnswer: (todo: AiTodo, answer: string) => void }) {
   const [answer, setAnswer] = useState("");
   return <article className={`ai-todo-card ${todo.blocking ? "blocking" : ""}`}>
@@ -168,12 +185,15 @@ function TodoCard({ todo, busy, onAnswer }: { todo: AiTodo; busy: boolean; onAns
   </article>;
 }
 
-function SessionListItem({ session, active, onClick }: { session: AiSessionSummary; active: boolean; onClick: () => void }) {
-  return <button type="button" className={`ai-session-row ${active ? "active" : ""}`} onClick={onClick}>
-    <span className={`ai-session-dot ${statusClass(session.status)}`} />
-    <div><strong>{session.tableName}</strong><small>{session.domain0} · {session.messageCount} 条消息</small></div>
-    <div><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge><time>{shortTime(session.updatedAt)}</time></div>
-  </button>;
+function SessionListItem({ session, active, selected, onClick, onSelectedChange }: { session: AiSessionSummary; active: boolean; selected: boolean; onClick: () => void; onSelectedChange: (checked: boolean) => void }) {
+  return <div className={`ai-session-row ${active ? "active" : ""}`}>
+    <Checkbox checked={selected} onCheckedChange={(value) => onSelectedChange(value === true)} aria-label={`选择 Session ${session.tableName}`} />
+    <button type="button" onClick={onClick}>
+      <span className={`ai-session-dot ${statusClass(session.status)}`} />
+      <div><strong>{session.tableName}</strong><small>{session.domain0} · {session.messageCount} 条消息</small></div>
+      <div><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge><time>{shortTime(session.updatedAt)}</time></div>
+    </button>
+  </div>;
 }
 
 export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTableName, onReviewTable, onApplyDraft }: AiPanelProps) {
@@ -199,10 +219,14 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const [dataset, setDataset] = useState<AiDataset | null>(null);
   const [datasetSyncing, setDatasetSyncing] = useState(false);
   const [datasetError, setDatasetError] = useState("");
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
+  const [sessionDeleteOpen, setSessionDeleteOpen] = useState(false);
+  const [sessionsDeleting, setSessionsDeleting] = useState(false);
   const activeTable = initialTableName ? tables.find((table) => table.tableName === initialTableName) : undefined;
   const domains = useMemo(() => [...new Set(tables.map((table) => table.domain0))].sort((a, b) => a.localeCompare(b, "zh-CN")), [tables]);
   const referencePaths = useMemo(() => referenceText.split("\n").map((item) => item.trim()).filter(Boolean), [referenceText]);
-  const currentJob = jobs.find((job) => ["queued", "running", "cancelling"].includes(job.status)) ?? jobs[0];
+  const activeJobs = jobs.filter((job) => ["queued", "running", "cancelling"].includes(job.status));
+  const visibleJobs = jobs.slice(0, 10);
   const tableSessions = activeTable ? sessions.filter((session) => session.tableName === activeTable.tableName) : [];
 
   const loadSession = useCallback(async (sessionId: string, silent = false) => {
@@ -414,6 +438,51 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     }
   };
 
+  const stopAllJobs = async () => {
+    if (activeJobs.length === 0) return;
+    try {
+      await api("/api/ai/jobs/cancel", { method: "POST", body: JSON.stringify({ all: true }) });
+      await refresh(true);
+      toast.success(`正在停止 ${activeJobs.length} 个批量任务`);
+    } catch (error) {
+      toast.error("批量停止失败", { description: error instanceof Error ? error.message : "未知错误" });
+    }
+  };
+
+  const setSessionSelected = (sessionId: string, checked: boolean) => setSelectedSessionIds((current) => {
+    const next = new Set(current);
+    if (checked) next.add(sessionId); else next.delete(sessionId);
+    return next;
+  });
+
+  const selectAllSessions = (checked: boolean) => {
+    setSelectedSessionIds(checked ? new Set(sessions.map((session) => session.id)) : new Set());
+  };
+
+  const deleteSelectedSessions = async () => {
+    const sessionIds = [...selectedSessionIds].filter((id) => sessions.some((session) => session.id === id));
+    if (sessionIds.length === 0) return;
+    setSessionsDeleting(true);
+    try {
+      await api<{ deleted: string[] }>("/api/ai/sessions", {
+        method: "DELETE",
+        body: JSON.stringify({ sessionIds }),
+      });
+      if (selectedSessionId && sessionIds.includes(selectedSessionId)) {
+        setSelectedSessionId(null);
+        setSelectedSession(null);
+      }
+      setSelectedSessionIds(new Set());
+      setSessionDeleteOpen(false);
+      await refresh(true);
+      toast.success(`已清理 ${sessionIds.length} 个 Session`);
+    } catch (error) {
+      toast.error("Session 清理失败", { description: error instanceof Error ? error.message : "未知错误" });
+    } finally {
+      setSessionsDeleting(false);
+    }
+  };
+
   const answerTodo = async (todo: AiTodo, answer: string) => {
     setAnsweringTodo(todo.id);
     try {
@@ -461,22 +530,29 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
   const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open") ?? [];
   const openTodos = todos.filter((todo) => todo.status === "open");
+  const reviewSessions = sessions.filter((session) => session.status === "draft_ready");
+  const selectedSessionCount = [...selectedSessionIds].filter((id) => sessions.some((session) => session.id === id)).length;
+  const allSessionsSelected = sessions.length > 0 && selectedSessionCount === sessions.length;
 
-  return <Sheet open={open} onOpenChange={onOpenChange}>
-    <SheetContent className="ai-workbench-sheet">
-      <SheetHeader className="ai-sheet-header">
+  if (!open) return null;
+
+  return <>
+    <main className="ai-workbench-page">
+      <header className="ai-sheet-header">
+        <Button variant="ghost" className="ai-page-back" onClick={() => onOpenChange(false)}><ArrowLeft size={16} />返回关系图</Button>
         <div className="ai-title-mark"><Sparkles size={18} /></div>
-        <div><SheetTitle>Claude Code 标注台</SheetTitle><SheetDescription>{activeTable ? `${activeTable.tableName} · 表级审核会话` : "批量生成、人工澄清与 Session 管理"}</SheetDescription></div>
+        <div><h1>Claude Code 标注台</h1><p>{activeTable ? `${activeTable.tableName} · 表级审核会话` : "批量生成、人工澄清与 Session 管理"}</p></div>
         <div className={`ai-connection ${health?.ready ? "online" : "offline"}`}><i />{health?.ready ? `${health.user} · 已连接` : "未连接"}</div>
-      </SheetHeader>
+      </header>
 
       {connectionError && <div className="ai-connection-error"><CircleAlert size={16} /><div><strong>本地 AI 服务不可用</strong><p>{connectionError}。请使用 <code>npm run start:local</code> 启动完整服务。</p></div><Button variant="outline" size="sm" onClick={() => refresh()}><RefreshCw size={13} />重试</Button></div>}
 
       <Tabs value={tab} onValueChange={setTab} className="ai-tabs">
         <TabsList>
           <TabsTrigger value="work"><WandSparkles size={14} />{activeTable ? "审核对话" : "批量生成"}</TabsTrigger>
-          <TabsTrigger value="sessions"><MessageSquareText size={14} />Sessions <span>{sessions.length}</span></TabsTrigger>
+          <TabsTrigger value="review"><FileCheck2 size={14} />待审核 <span>{reviewSessions.length}</span></TabsTrigger>
           <TabsTrigger value="todos"><ListTodo size={14} />待澄清 <span>{openTodos.length}</span></TabsTrigger>
+          <TabsTrigger value="sessions"><MessageSquareText size={14} />Sessions <span>{sessions.length}</span></TabsTrigger>
           <TabsTrigger value="prompt"><FileText size={14} />提示词</TabsTrigger>
           <TabsTrigger value="settings"><FolderSearch size={14} />资料</TabsTrigger>
         </TabsList>
@@ -506,14 +582,29 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
             <div className="ai-chat-composer"><Textarea value={chatMessage} onChange={(event) => setChatMessage(event.target.value)} placeholder={selectedSession ? "指出不准确的字段、补充业务规则，或要求重新检查…" : "填写本表的生成要求"} rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void sendMessage(); }} /><div><span>本轮内容写入 <code>{"{{user_message}}"}</code></span><Button onClick={sendMessage} disabled={chatBusy || !health?.ready || !chatMessage.trim() || !promptValid}>{chatBusy ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{selectedSession ? "发送并修订" : "生成当前表"}</Button></div></div>
           </div> : <div className="ai-batch-workspace">
             <section className="ai-batch-card"><div className="ai-section-heading"><div><WandSparkles size={18} /><span>生成所有 JSON 的标注草稿</span></div><Badge variant="outline">逐表 Session</Badge></div><p>每张表建立独立会话，批量任务只负责统一调度。草稿不会覆盖当前标注。</p><label><span>生成范围</span><Select value={batchDomain} onValueChange={setBatchDomain}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__all__">全部 0级域 · {tables.length} 张表</SelectItem>{domains.map((domain) => <SelectItem key={domain} value={domain}>{domain} · {tables.filter((table) => table.domain0 === domain).length} 张表</SelectItem>)}</SelectContent></Select></label><label><span>批量任务要求</span><Textarea value={batchInstruction} onChange={(event) => setBatchInstruction(event.target.value)} rows={3} /></label><Button onClick={startBatch} disabled={!health?.ready || batchBusy || tables.length === 0 || !batchInstruction.trim() || !promptValid}>{batchBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}启动全量生成</Button></section>
-            {currentJob && <section className="ai-job-card"><div><div><span className={`ai-session-dot ${statusClass(currentJob.status)}`} /><strong>{currentJob.label}</strong></div><Badge variant="outline" className={statusClass(currentJob.status)}>{statusLabel(currentJob.status)}</Badge></div><Progress value={currentJob.total ? ((currentJob.completed + currentJob.failed) / currentJob.total) * 100 : 0} /><div className="ai-job-stats"><span>{currentJob.completed} 已完成</span><span>{currentJob.failed} 失败</span><span>{currentJob.total - currentJob.completed - currentJob.failed} 待处理</span>{["queued", "running"].includes(currentJob.status) && <button onClick={() => stopJob(currentJob)}><Square size={11} />停止</button>}</div></section>}
+            {activeJobs.length > 0 && <div className="ai-bulk-stop"><span>{activeJobs.length} 个批量任务正在执行或排队</span><Button variant="destructive" size="sm" onClick={stopAllJobs}><Square size={12} />全部停止</Button></div>}
+            <div className="ai-job-list">{visibleJobs.map((job) => <section className="ai-job-card" key={job.id}><div><div><span className={`ai-session-dot ${statusClass(job.status)}`} /><strong>{job.label}</strong></div><Badge variant="outline" className={statusClass(job.status)}>{statusLabel(job.status)}</Badge></div><Progress value={job.total ? ((job.completed + job.failed) / job.total) * 100 : 0} /><div className="ai-job-stats"><span>{job.completed} 已完成</span><span>{job.failed} 失败</span><span>{Math.max(0, job.total - job.completed - job.failed)} 待处理</span>{["queued", "running", "cancelling"].includes(job.status) && <button onClick={() => stopJob(job)} disabled={job.status === "cancelling"}><Square size={11} />{job.status === "cancelling" ? "停止中" : "停止"}</button>}</div></section>)}</div>
             <div className="ai-batch-note"><Clock3 size={15} /><p>生成在服务器后台继续运行。关闭浏览器或 SSH 不会中断由 systemd 托管的任务。</p></div>
           </div>}
         </TabsContent>
 
+        <TabsContent value="review" className="ai-tab-content ai-review-list">
+          <div className="ai-list-heading"><div><strong>待人工审核草稿</strong><span>只有生成完成且不再阻塞澄清的 Session 会进入这里</span></div><Badge variant="outline">{reviewSessions.length} 待审核</Badge></div>
+          {reviewSessions.map((session) => <article className="ai-review-card" key={session.id}>
+            <div><span className={`ai-session-dot ${statusClass(session.status)}`} /><div><code>{session.tableName}</code><small>{session.domain0} · 更新于 {shortTime(session.updatedAt)}</small></div><Badge variant="outline">{session.todoCount ? `${session.todoCount} 个非阻塞澄清` : "可审核"}</Badge></div>
+            <div><span>{session.messageCount} 条对话</span><span>{session.relatedTableCount ?? 0} 张直接关联表</span><Button size="sm" onClick={() => { setSelectedSessionId(session.id); onReviewTable(session.tableName); setTab("work"); }}>审核此表</Button></div>
+          </article>)}
+          {reviewSessions.length === 0 && <EmptyState icon={CheckCircle2} title="没有待审核草稿" detail="生成完成且无需继续澄清的表会出现在这里。" />}
+        </TabsContent>
+
         <TabsContent value="sessions" className="ai-tab-content ai-sessions-content">
-          <div className="ai-session-list"><div className="ai-list-heading"><div><strong>Schema Atlas Sessions</strong><span>只展示本系统登记的会话</span></div><Button variant="outline" size="sm" onClick={() => refresh()}><RefreshCw size={13} />刷新</Button></div>{sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} onClick={() => selectSession(session.id)} />)}{sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}</div>
-          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}{selectedSession.activities.length > 0 && <details className="ai-activities"><summary>执行过程 · {selectedSession.activities.length}</summary>{selectedSession.activities.map((item) => <div key={item.id}><time>{shortTime(item.at)}</time><span>{item.label}</span></div>)}</details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整的人工与 Claude Code 对话过程。" />}</div>
+          <div className="ai-session-list">
+            <div className="ai-list-heading"><div><strong>Schema Atlas Sessions</strong><span>只展示本系统登记的会话</span></div><Button variant="outline" size="sm" onClick={() => refresh()}><RefreshCw size={13} />刷新</Button></div>
+            {sessions.length > 0 && <div className="ai-session-bulk"><label><Checkbox checked={allSessionsSelected} onCheckedChange={(value) => selectAllSessions(value === true)} /><span>全选</span></label><span>已选 {selectedSessionCount}</span><Button variant="destructive" size="sm" disabled={selectedSessionCount === 0} onClick={() => setSessionDeleteOpen(true)}><Trash2 size={12} />清理</Button></div>}
+            {sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} selected={selectedSessionIds.has(session.id)} onClick={() => selectSession(session.id)} onSelectedChange={(checked) => setSessionSelected(session.id, checked)} />)}
+            {sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}
+          </div>
+          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" onClick={() => { onReviewTable(selectedSession.tableName); setTab("work"); }}>审核此表</Button></div></div><SessionTranscript session={selectedSession} /><SessionTrace session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整对话、工具调用及读取资料的过程。" />}</div>
         </TabsContent>
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">
@@ -539,6 +630,18 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
           <section className="ai-runtime-card"><div><span>导入数据集</span><code>{datasetSyncing ? "正在落盘…" : dataset ? `${dataset.tableCount} 张表 · ${dataset.relationshipCount} 条关系 · 已落盘` : datasetError || "等待本地服务"}</code></div><div><span>运行账户</span><code>{health?.user || "未连接"}</code></div><div><span>Claude Code</span><code>{health?.version || health?.error || "未检测"}</code></div><div><span>登录状态</span><code>{health?.authenticated ? "已登录" : "未登录"}</code></div><div><span>权限模式</span><code>--dangerously-skip-permissions</code></div><div><span>允许根目录</span><div>{health?.allowedRoots?.map((root) => <code key={root}>{root}</code>) ?? <code>等待连接</code>}</div></div></section>
         </TabsContent>
       </Tabs>
-    </SheetContent>
-  </Sheet>;
+    </main>
+    <AlertDialog open={sessionDeleteOpen} onOpenChange={setSessionDeleteOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>清理选中的 {selectedSessionCount} 个 Session？</AlertDialogTitle>
+          <AlertDialogDescription>完整对话、Claude Code 操作轨迹、工作目录和草稿都会从本地服务删除。正在执行的关联批量任务会先停止。</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={sessionsDeleting}>取消</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" disabled={sessionsDeleting} onClick={deleteSelectedSessions}>{sessionsDeleting ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />}确认清理</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  </>;
 }

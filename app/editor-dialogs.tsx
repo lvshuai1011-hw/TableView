@@ -17,27 +17,8 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
-import { Column, ColumnAnnotation, EnumValue, SchemaTable, SemanticRole, Sensitivity } from "./data";
+import { Column, ColumnAnnotation, EnumValue, SchemaTable } from "./data";
 import { ChangeRecord, migrateColumn, normalizeExportType } from "./schema-utils";
-
-const SEMANTIC_ROLES: { value: SemanticRole; label: string }[] = [
-  { value: "identifier", label: "标识" },
-  { value: "name", label: "名称" },
-  { value: "time", label: "时间" },
-  { value: "amount", label: "金额/额度" },
-  { value: "quantity", label: "数量" },
-  { value: "status", label: "状态" },
-  { value: "code", label: "编码/类型" },
-  { value: "description", label: "描述" },
-  { value: "other", label: "其他" },
-];
-
-const SENSITIVITIES: { value: Sensitivity; label: string }[] = [
-  { value: "none", label: "未标注" },
-  { value: "internal", label: "内部" },
-  { value: "sensitive", label: "敏感" },
-  { value: "restricted", label: "受限" },
-];
 
 function parseList(value: string) {
   return [...new Set(value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean))];
@@ -58,7 +39,6 @@ function FieldEditorForm({
 }) {
   const [draft, setDraft] = useState<ColumnAnnotation>(() => migrateColumn(column).annotation!);
   const [aliasesText, setAliasesText] = useState(() => draft.aliases.join("，"));
-  const [tagsText, setTagsText] = useState(() => draft.tags.join("，"));
   const [enumAliasTexts, setEnumAliasTexts] = useState(() => draft.enumValues.map((item) => item.aliases.join("，")));
   const update = <K extends keyof ColumnAnnotation>(key: K, value: ColumnAnnotation[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const updateEnum = (index: number, patch: Partial<EnumValue>) => update("enumValues", draft.enumValues.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
@@ -84,13 +64,19 @@ function FieldEditorForm({
         <Switch checked={draft.included} onCheckedChange={(checked) => update("included", checked)} />
       </section>
 
+      {(column.description || column.remark) && <section className="editor-section imported-field-context">
+        <h3>导入 JSON 中的字段资料</h3>
+        {column.description && <div><span>description</span><p>{column.description}</p></div>}
+        {column.remark && <div><span>remark</span><p>{column.remark}</p></div>}
+      </section>}
+
       <section className="editor-section">
         <h3>属性基础信息</h3>
         <div className="editor-grid two">
-          <label><span>属性名 attr_name</span><Input value={draft.entityColumn} onChange={(event) => update("entityColumn", event.target.value)} placeholder="freeUnitInstanceID" /></label>
-          <label><span>字段别名（逗号或换行分隔）</span><Input value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} placeholder="标识，主键" /></label>
+          <label><span>属性名 attr_name</span><Input value={draft.entityColumn} onChange={(event) => update("entityColumn", event.target.value)} /></label>
+          <label><span>字段别名 aliases（逗号或换行分隔）</span><Input value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} /></label>
         </div>
-        <label><span>详细中文描述</span><Textarea value={draft.detailedDescription} onChange={(event) => update("detailedDescription", event.target.value)} placeholder={column.remark || column.description || "说明字段的业务含义、使用规则和联动要求"} /></label>
+        <label><span>中英文业务语义描述 description</span><Textarea value={draft.detailedDescription} onChange={(event) => update("detailedDescription", event.target.value)} /></label>
         <div className="editor-boolean-grid">
           <label><Switch checked={draft.isLocalId} onCheckedChange={(checked) => update("isLocalId", checked)} /><span><strong>is_local_id</strong><small>false 时不导出</small></span></label>
           <label><Switch checked={draft.isDisplayName} onCheckedChange={(checked) => update("isDisplayName", checked)} /><span><strong>is_display_name</strong><small>作为对象显示名称</small></span></label>
@@ -99,29 +85,18 @@ function FieldEditorForm({
         </div>
       </section>
 
-      <section className="editor-section">
-        <h3>辅助治理信息</h3>
-        <div className="editor-grid four">
-          <label><span>语义角色</span><select value={draft.semanticRole} onChange={(event) => update("semanticRole", event.target.value as SemanticRole)}>{SEMANTIC_ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-          <label><span>敏感级别</span><select value={draft.sensitivity} onChange={(event) => update("sensitivity", event.target.value as Sensitivity)}>{SENSITIVITIES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-          <label><span>单位</span><Input value={draft.unit} onChange={(event) => update("unit", event.target.value)} placeholder="MB / 分钟" /></label>
-          <label><span>取值范围</span><Input value={draft.valueRange} onChange={(event) => update("valueRange", event.target.value)} placeholder="例如 ≥ 0" /></label>
-        </div>
-        <label><span>治理标签（逗号或换行分隔）</span><Input value={tagsText} onChange={(event) => setTagsText(event.target.value)} placeholder="计费，资源，关键字段" /></label>
-      </section>
-
       <section className="editor-section enum-editor">
         <div className="editor-section-heading"><div><h3>枚举引用</h3><p>设置后，字段只输出 enum_ref，枚举定义单独写入当前 0级域的 enums 文件夹。</p></div><Badge variant="outline">{draft.enumValues.length} 个值</Badge></div>
         <div className="editor-grid two">
-          <label><span>enum_ref</span><Input value={draft.enumRef} onChange={(event) => update("enumRef", event.target.value)} placeholder="QuotaCycleType" /></label>
-          <label><span>枚举说明</span><Input value={draft.enumDescription} onChange={(event) => update("enumDescription", event.target.value)} placeholder="免费资源代付限额周期类型" /></label>
+          <label><span>enum_ref</span><Input value={draft.enumRef} onChange={(event) => update("enumRef", event.target.value)} /></label>
+          <label><span>枚举说明</span><Input value={draft.enumDescription} onChange={(event) => update("enumDescription", event.target.value)} /></label>
         </div>
         {draft.enumRef && <div className="enum-values">
           {draft.enumValues.map((item, index) => <article key={`${index}-${item.value}`}>
-            <Input value={item.value} onChange={(event) => updateEnum(index, { value: event.target.value })} placeholder="值，如 D" />
-            <Input value={item.description} onChange={(event) => updateEnum(index, { description: event.target.value })} placeholder="中文说明" />
-            <Input value={item.descriptionEn} onChange={(event) => updateEnum(index, { descriptionEn: event.target.value })} placeholder="English description" />
-            <Input value={enumAliasTexts[index] ?? ""} onChange={(event) => setEnumAliasTexts((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder="别名" />
+            <Input value={item.value} onChange={(event) => updateEnum(index, { value: event.target.value })} aria-label="枚举值" />
+            <Input value={item.description} onChange={(event) => updateEnum(index, { description: event.target.value })} aria-label="枚举中文说明" />
+            <Input value={item.descriptionEn} onChange={(event) => updateEnum(index, { descriptionEn: event.target.value })} aria-label="枚举英文说明" />
+            <Input value={enumAliasTexts[index] ?? ""} onChange={(event) => setEnumAliasTexts((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} aria-label="枚举别名" />
             <button onClick={() => removeEnum(index)} aria-label={`删除枚举值 ${item.value || index + 1}`}><Trash2 size={14} /></button>
           </article>)}
           <Button type="button" variant="outline" onClick={addEnum}><Plus size={14} />添加枚举值</Button>
@@ -130,7 +105,7 @@ function FieldEditorForm({
     </div>
     <DialogFooter className="editor-footer">
       <Button variant="outline" className="editor-delete" onClick={onDelete}><Trash2 size={14} />删除字段</Button>
-      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parseList(aliasesText), tags: parseList(tagsText), enumRef: draft.enumRef.trim(), enumValues: draft.enumValues.map((item, index) => ({ ...item, value: item.value.trim(), aliases: parseList(enumAliasTexts[index] ?? "") })) })}>保存标注</Button></div>
+      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parseList(aliasesText), enumRef: draft.enumRef.trim(), enumValues: draft.enumValues.map((item, index) => ({ ...item, value: item.value.trim(), aliases: parseList(enumAliasTexts[index] ?? "") })) })}>保存标注</Button></div>
     </DialogFooter>
   </DialogContent>;
 }
@@ -162,9 +137,9 @@ function TableConfigForm({ table, onOpenChange, onSave, error }: { table: Schema
   return <DialogContent className="table-config-dialog sm:max-w-xl">
     <DialogHeader><div className="dialog-mark"><Tags size={20} /></div><DialogTitle>配置类 · {table.tableName}</DialogTitle><DialogDescription>一张表对应一个唯一类，类信息用于本体与 RDB Mapping 文件命名。</DialogDescription></DialogHeader>
     <div className="table-config-fields">
-      <label><span>类名 class_name</span><Input value={className} onChange={(event) => setClassName(event.target.value)} placeholder="FreeUnitInstance" /></label>
-      <label><span>类别名（逗号或换行分隔）</span><Input value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder="赠送实例，免费流量，套餐内时长" /></label>
-      <label><span>类的详细中文描述</span><Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={7} /></label>
+      <label><span>类名 class_name</span><Input value={className} onChange={(event) => setClassName(event.target.value)} /></label>
+      <label><span>类别名 aliases（逗号或换行分隔）</span><Input value={aliases} onChange={(event) => setAliases(event.target.value)} /></label>
+      <label><span>类的中英文业务语义描述</span><Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={9} /></label>
       {error && <p className="editor-error">{error}</p>}
     </div>
     <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!className.trim()} onClick={() => onSave({ className: className.trim(), classDescription: description.trim(), classAliases: parseList(aliases) })}>保存类信息</Button></DialogFooter>

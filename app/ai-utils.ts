@@ -22,17 +22,12 @@ export function mergeAiDraftIntoTable(table: SchemaTable, draft: AiTableDraft): 
         isDisplayName: proposed.isDisplayName,
         isSemantic: proposed.isSemantic,
         isCode: proposed.isCode,
-        semanticRole: proposed.semanticRole,
-        tags: [...new Set(proposed.tags.map((item) => item.trim()).filter(Boolean))],
-        unit: proposed.unit.trim(),
         enumValues: proposed.enumValues.map((item) => ({
           value: item.value.trim(),
           description: item.description.trim(),
           descriptionEn: item.descriptionEn.trim(),
           aliases: [...new Set(item.aliases.map((alias) => alias.trim()).filter(Boolean))],
         })).filter((item) => item.value),
-        valueRange: proposed.valueRange.trim(),
-        sensitivity: proposed.sensitivity,
         enumRef: proposed.enumRef.trim(),
         enumDescription: proposed.enumDescription.trim(),
       };

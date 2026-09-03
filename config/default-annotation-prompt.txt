@@ -1,18 +1,24 @@
 你正在为 Schema Atlas 标注数据库表 {{table_name}}。当前任务模式：{{mode}}。
 
-请完整读取当前工作目录中的 input-table.json、dataset-context.json；如果 current-draft.json 存在，也要读取它。先根据 dataset-context.json 和关系索引读取所有已导入的直接关联表，再按需检查同 0级域的其他表。随后阅读列出的本地参考资料，必要时搜索其中的代码、SQL、配置和已经标注好的 JSON。这是本地文件分析，不要建立向量库，也不要修改任何输入资料。
+你的目标不是复述表名、字段名或程序实现，而是根据可核验资料抽象出可供业务人员理解和复用的本体语义。最终草稿必须完整覆盖类名、类描述、类别名、所有字段的属性名、字段描述、字段别名、布尔标志和能够确认的枚举引用。
+
+开始前必须完成以下检索：
+1. 完整读取当前工作目录中的 input-table.json 和 dataset-context.json；current-draft.json 存在时也要读取。
+2. 根据 dataset-context.json 与关系索引读取全部已导入的直接父表、子表及外键字段；再按需读取同一 0级域中的其他表。
+3. 阅读用户配置的本地参考资料，搜索代码、SQL、配置、领域文档和已经标注好的 JSON。代码只作为理解业务概念的证据，不要把类名、方法流程、接口调用或 SQL 实现写进业务描述。
+4. 对疑似枚举字段，必须额外搜索参考资料中的 `**/ontologies/**/entity-classes/*.json`、`**/ontologies/**/enums/*.json`，以及字段注释中的取值范围。
 
 Schema Atlas 后台数据集：
 {{dataset_context}}
 
-本地参考资料（以下路径由用户配置，已列在 reference_paths 中）：
+本地参考资料：
 {{reference_paths}}
 
-参考资料用途约定：
-- DB、RB、WEB 目录主要用于理解字段的业务含义：在判断字段语义、枚举取值、布尔标志、别名和 detailedDescription 时，优先在这些目录的代码、SQL、配置和已标注 JSON 中检索证据。
-- Teleco_Context 目录主要用于参考字段应如何标注（即格式与写法）：在确定 className、entityColumn、枚举与布尔标志的表达方式、detailedDescription 的描述粒度等格式问题时，以 Teleco_Context 中已有的标注为范本。
-- 当某个字段名在 Teleco_Context 与 DB/RB/WEB 中完全相同时，可以同时参考 Teleco_Context 的标注格式与 DB/RB/WEB 的业务含义。
-- 仍需遵循生成规则：只有上述资料中没有明确依据、或不同资料互相冲突时，才加入 todos。
+参考资料用途：
+- DB、RB、WEB 等目录用于确认实体、字段、取值、约束和上下游对象的业务含义。
+- Teleco_Context 及其他已标注 Ontology JSON 用于确认本体命名、双语描述粒度、aliases、布尔标志与 enum_ref 的表达方式。
+- 同名字段不能直接假定同义，必须结合所在表、外键方向、备注和实际使用场景判断。
+- 资料之间冲突时保留证据并进入待澄清，不要自行选择一个结论。
 
 已有人工澄清：
 {{clarifications}}
@@ -21,12 +27,19 @@ Schema Atlas 后台数据集：
 {{user_message}}
 
 生成规则：
-1. 只能标注 input-table.json 中已经存在的表和字段，不能凭空增加数据库列。
-2. 后台数据集中的表 JSON、关系索引和外部参考资料均为只读依据，不要修改。
-3. className 使用清晰的英文 PascalCase；entityColumn 使用英文 camelCase，并保持一表一类、类内属性名唯一。
-4. detailedDescription、别名、枚举及布尔标志必须有业务依据；isLocalId 只用于本类局部身份键，isCode 只用于编码语义字段。
-5. 遇到含义不明确的概念时，必须先检索 input-table.json、直接关联表、关系索引、相关同域表、现有草稿以及配置的本地参考资料。只有上述资料仍没有明确依据，或不同资料互相冲突时，才可以加入 todos；不得仅因初步置信度低就直接提问。
-6. 每条 todo 的 checkedSources 要列出已经检查过的文件、目录或线索；reason 要说明缺少了什么证据或哪些证据存在冲突，并尽量给出候选答案。
-7. included 表示数据库字段是否进入本体和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，无需修改数据库类型。
-8. 枚举字段应填写 enumRef、enumDescription 和 enumValues；没有证据时不要编造枚举值。
-9. reply 使用简洁中文总结本轮结论和仍需人工关注的内容，最终结果必须严格符合指定 JSON Schema。
+1. 只能标注 input-table.json 中存在的表和字段，不能创造数据库列。原始 JSON、关系索引和参考资料均为只读。
+2. className 使用完整、自然、通用的英文 PascalCase 业务概念。优先复用资料中已经存在的本体类名；不要直接沿用 ACCT、PNT、INST 等数据库缩写，例如有明确账户语义时应使用 Account，而不是 Acct。
+3. classDescription 必须使用以下格式，并同时提供充分的中英文业务语义：
+   中文描述：说明实体是什么、代表哪个业务对象、承担哪些业务职责、与关键上下游对象的关系及适用边界。应形成完整段落，不能只写“用于记录……”的一句话。
+
+   English Description: Provide an equivalent English business-semantic description with the same scope and level of detail.
+4. classAliases 必须提供 4–12 个有用且不重复的中英文别名，覆盖正式名称、常用业务称呼和可靠同义词。不得只把 tableName 或 className 改写大小写充数。
+5. entityColumn 使用英文 camelCase，保持一表一类、类内属性名唯一，并优先复用已有本体中的属性名。
+6. 每个纳入导出的字段都必须填写 detailedDescription，格式与类描述一致：以“中文描述：”开头，再以“English Description:”提供等价英文。内容应说明字段所表达的业务事实、所属对象、作用范围、与其他业务概念的关系以及资料能够证明的约束；不要描述数据库类型、代码读写、SQL 查询、序列器、接口或程序执行过程。
+7. 每个纳入导出的字段都必须提供 2–8 个不重复的 aliases，至少包含自然英文名称和中文业务名称；有可靠资料时补充常用称呼、全称或同义词。别名不能包含未经证实的新业务含义。
+8. isLocalId 仅在字段构成本类实例的局部身份键时设为 true；isCode 仅在字段本身表达业务编码时设为 true；isDisplayName 和 isSemantic 也必须依据资料判断。false 不会导出到最终 JSON。
+9. 枚举识别不能只看字段名。对于 TYPE、CLASS、STATUS、STATE、MODE、LEVEL、CATEGORY、FLAG、CODE 等候选字段，先搜索已有 entity-classes 中的 enum_ref，再查找对应 enums JSON 或原始备注的明确取值。确认后使用原文件的 enum_name 填写 enumRef，并将可读取的 description、values 和 aliases 准确写入 enumDescription 与 enumValues；最终实体属性只引用 enum_ref，枚举定义单独导出。外键 ID、自由文本和没有有限取值证据的字段不得标成枚举。
+10. included 表示字段是否进入 Ontology 和 RDB Mapping。数据类型由 Schema Atlas 根据数据库类型固定转换，无需修改。
+11. reason 应简要写明本次命名、标志或枚举判断所依据的文件与业务证据，方便人工审核。
+12. 遇到含义不明确的概念，必须先检查当前表、原始 remark、直接关联表、关系索引、同域表、现有草稿和全部已配置参考路径。只有仍无明确依据或证据冲突时才能加入 todos。每条 todo 的 checkedSources 必须列出实际检查过的文件或线索，reason 说明缺失或冲突，并尽量给出候选答案。
+13. reply 用简洁中文汇总完成情况、识别出的枚举和仍需人工处理的事项。最终结果必须严格符合指定 JSON Schema。

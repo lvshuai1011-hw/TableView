@@ -120,12 +120,7 @@ test("normalizes missing level-one domains and exports the requested ontology la
         isDisplayName: false,
         isSemantic: false,
         isCode: true,
-        semanticRole: "identifier",
-        tags: [],
-        unit: "",
         enumValues: [],
-        valueRange: "",
-        sensitivity: "none",
         enumRef: "",
         enumDescription: "",
       },
@@ -177,12 +172,7 @@ test("writes enum references and definitions as separate files", async () => {
         isDisplayName: false,
         isSemantic: false,
         isCode: false,
-        semanticRole: "code",
-        tags: [],
-        unit: "",
         enumValues: [{ value: "D", description: "日限额", descriptionEn: "Daily limit", aliases: [] }],
-        valueRange: "",
-        sensitivity: "none",
         enumRef: "QuotaCycleType",
         enumDescription: "免费资源代付限额周期类型",
       },
@@ -198,6 +188,49 @@ test("writes enum references and definitions as separate files", async () => {
   assert.equal(ontology.attributes[0].is_local_id, undefined);
   assert.equal(ontology.attributes[0].is_code, undefined);
   assert.equal(enumFile.values[0].description_en, "Daily limit");
+});
+
+test("keeps an existing enum reference without inventing an empty enum definition", async () => {
+  const { buildExportFiles, migrateTables } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const [table] = migrateTables([{
+    tableName: "PE_ACCOUNT",
+    className: "Account",
+    classDescription: "账户",
+    classAliases: [],
+    description: "",
+    folder: "",
+    domain0: "Account",
+    domain1: "",
+    columns: [{
+      name: "ACCOUNT_CLASS",
+      description: "账户类别",
+      dataType: "VARCHAR2(1)",
+      length: "1",
+      isPrimaryKey: false,
+      nullable: false,
+      remark: "",
+      annotation: {
+        included: true,
+        entityColumn: "accountClass",
+        aliases: ["Account class", "账户类别"],
+        detailedDescription: "账户的实际使用归属与目的类别",
+        isLocalId: false,
+        isDisplayName: false,
+        isSemantic: false,
+        isCode: false,
+        enumValues: [],
+        enumRef: "AccountClass",
+        enumDescription: "",
+      },
+    }],
+    foreignKeys: [],
+    referencedBy: [],
+  }]);
+
+  const files = buildExportFiles([table]);
+  assert.equal(files.length, 2);
+  assert.equal(JSON.parse(files[0].content).attributes[0].enum_ref, "AccountClass");
+  assert.equal(files.some((file) => file.path.includes("/enums/")), false);
 });
 
 test("reports missing relationship fields separately from excluded export fields", async () => {

@@ -53,6 +53,14 @@ export type AiTodo = {
 
 export type AiActivity = { id: string; label: string; at: string };
 
+export type AiTraceEvent = {
+  id: string;
+  kind: "system" | "assistant" | "tool_use" | "tool_result" | "result" | "error" | "raw";
+  label: string;
+  detail: string;
+  at: string;
+};
+
 export type AiSessionSummary = {
   id: string;
   claudeSessionId: string;
@@ -80,6 +88,7 @@ export type AiSession = Omit<AiSessionSummary, "messageCount" | "todoCount" | "h
   referencePaths: { requestedPath: string; resolvedPath: string; kind: "file" | "directory"; addDir: string }[];
   promptTemplate?: string;
   turnCount: number;
+  trace?: AiTraceEvent[];
 };
 
 export type AiJob = {

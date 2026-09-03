@@ -26,6 +26,7 @@ const port = Number(process.env.SCHEMA_ATLAS_AI_PORT || 4317);
 const store = new AtlasStore(storeRoot);
 const runningSessions = new Map();
 const runningJobs = new Set();
+const cancelledJobs = new Set();
 let allowedRoots = [];
 let healthCache = null;
 let defaultPromptTemplate = "";
@@ -129,6 +130,7 @@ function claudeArguments(session, referencePaths, datasetDirectory) {
 
 async function runClaudeTurn({ session, table, userMessage, mode, datasetContext, referencePaths, promptTemplate, onEvent = () => {} }) {
   if (runningSessions.has(session.id)) throw Object.assign(new Error("该会话正在运行，请等待本轮完成"), { statusCode: 409 });
+  if (session.jobId && cancelledJobs.has(session.jobId)) throw new Error("批量任务已停止");
   if (!datasetContext) throw Object.assign(new Error("缺少当前表的数据集上下文"), { statusCode: 400 });
   const workspace = store.workspacePath(session.id);
   await writeFile(path.join(workspace, "input-table.json"), `${JSON.stringify(table, null, 2)}\n`, "utf8");
@@ -160,6 +162,7 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
     shell: false,
   });
   runningSessions.set(session.id, child);
+  if (session.jobId && cancelledJobs.has(session.jobId)) child.kill("SIGTERM");
   child.stdin.on("error", () => {});
   child.stdin.end(prompt);
 
@@ -290,12 +293,80 @@ async function recoverInterruptedWork() {
   }
 }
 
+async function stopSessionProcess(sessionId) {
+  const child = runningSessions.get(sessionId);
+  if (!child) return;
+  await new Promise((resolve) => {
+    let settled = false;
+    let forceTimer;
+    let finishTimer;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceTimer);
+      clearTimeout(finishTimer);
+      resolve();
+    };
+    child.once("close", finish);
+    child.kill("SIGTERM");
+    forceTimer = setTimeout(() => {
+      if (!settled) child.kill("SIGKILL");
+    }, 3_000);
+    forceTimer.unref?.();
+    finishTimer = setTimeout(finish, 5_000);
+    finishTimer.unref?.();
+  });
+}
+
+async function cancelJob(job) {
+  if (!job || !["queued", "running", "cancelling"].includes(job.status)) return job;
+  cancelledJobs.add(job.id);
+  job.cancelled = true;
+  job.status = "cancelling";
+  await store.saveJob(job);
+  await Promise.all((job.sessionIds ?? []).map(stopSessionProcess));
+  return job;
+}
+
+async function handleDeleteSessions(request, response) {
+  const body = await readJsonBody(request);
+  const sessionIds = Array.isArray(body.sessionIds) ? [...new Set(body.sessionIds.map(String))] : [];
+  if (sessionIds.length === 0) throw Object.assign(new Error("请选择要清理的 Session"), { statusCode: 400 });
+  const sessions = (await Promise.all(sessionIds.map((id) => store.readSession(id)))).filter(Boolean);
+  if (sessions.length !== sessionIds.length) throw Object.assign(new Error("部分 Session 已不存在，请刷新后重试"), { statusCode: 404 });
+  const jobIds = [...new Set(sessions.map((session) => session.jobId).filter(Boolean))];
+  const jobs = (await Promise.all(jobIds.map((id) => store.readJob(id)))).filter(Boolean);
+  await Promise.all(jobs.map(cancelJob));
+  await Promise.all(sessionIds.map(stopSessionProcess));
+  const deleted = await store.deleteSessions(sessionIds);
+  return jsonResponse(response, 200, { deleted });
+}
+
+async function handleCancelJobs(request, response) {
+  const body = await readJsonBody(request);
+  const summaries = await store.listJobs();
+  const requested = body.all === true
+    ? summaries.filter((job) => ["queued", "running", "cancelling"].includes(job.status)).map((job) => job.id)
+    : Array.isArray(body.jobIds) ? [...new Set(body.jobIds.map(String))] : [];
+  if (requested.length === 0) throw Object.assign(new Error("没有可停止的批量任务"), { statusCode: 400 });
+  const jobs = (await Promise.all(requested.map((id) => store.readJob(id)))).filter(Boolean);
+  await Promise.all(jobs.map(cancelJob));
+  return jsonResponse(response, 202, { jobs });
+}
+
 async function runBatch(job, tables, references) {
   if (runningJobs.has(job.id)) return;
   runningJobs.add(job.id);
   job.status = "running";
   await store.saveJob(job);
   try {
+    const startingState = await store.readJob(job.id);
+    if (startingState?.cancelled || cancelledJobs.has(job.id)) {
+      job.cancelled = true;
+      job.status = "cancelled";
+      await store.saveJob(job);
+      return;
+    }
     for (const table of tables) {
       const latest = await store.readJob(job.id);
       if (latest?.cancelled) {
@@ -309,6 +380,7 @@ async function runBatch(job, tables, references) {
         session = await store.createSession({ table, jobId: job.id, datasetId: job.datasetId, referencePaths: references, promptTemplate: job.promptTemplate });
         job.sessionIds.push(session.id);
         await store.saveJob(job);
+        if (cancelledJobs.has(job.id)) throw new Error("批量任务已停止");
         await runClaudeTurn({
           session,
           table,
@@ -320,9 +392,14 @@ async function runBatch(job, tables, references) {
         });
         job.completed += 1;
       } catch {
-        job.failed += 1;
+        const latestAfterTurn = await store.readJob(job.id);
+        if (latestAfterTurn?.cancelled) {
+          job.cancelled = true;
+          job.status = "cancelled";
+        } else job.failed += 1;
       }
       await store.saveJob(job);
+      if (job.cancelled) break;
     }
     if (!job.cancelled) job.status = job.failed > 0 ? "completed_with_errors" : "completed";
     await store.saveJob(job);
@@ -332,6 +409,7 @@ async function runBatch(job, tables, references) {
     await store.saveJob(job);
   } finally {
     runningJobs.delete(job.id);
+    cancelledJobs.delete(job.id);
   }
 }
 
@@ -445,7 +523,7 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   if (!url.pathname.startsWith("/api/ai/")) return jsonResponse(response, 404, { error: "接口不存在" });
   if (request.method === "OPTIONS") {
-    response.writeHead(204, { allow: "GET, POST, OPTIONS", "cache-control": "no-store" });
+    response.writeHead(204, { allow: "GET, POST, DELETE, OPTIONS", "cache-control": "no-store" });
     return response.end();
   }
   if (url.pathname === "/api/ai/health") {
@@ -466,8 +544,9 @@ async function handleRequest(request, response) {
     return jsonResponse(response, 200, { dataset });
   }
   if (url.pathname === "/api/ai/sessions") {
-    if (request.method !== "GET") return methodNotAllowed(response);
-    return jsonResponse(response, 200, { sessions: await store.listSessions() });
+    if (request.method === "GET") return jsonResponse(response, 200, { sessions: await store.listSessions() });
+    if (request.method === "DELETE") return handleDeleteSessions(request, response);
+    return methodNotAllowed(response);
   }
   if (url.pathname === "/api/ai/jobs") {
     if (request.method !== "GET") return methodNotAllowed(response);
@@ -485,11 +564,17 @@ async function handleRequest(request, response) {
     if (request.method !== "POST") return methodNotAllowed(response);
     return handleGenerate(request, response);
   }
+  if (url.pathname === "/api/ai/jobs/cancel") {
+    if (request.method !== "POST") return methodNotAllowed(response);
+    return handleCancelJobs(request, response);
+  }
   const sessionMatch = url.pathname.match(/^\/api\/ai\/sessions\/([0-9a-f-]+)$/i);
   if (sessionMatch) {
     if (request.method !== "GET") return methodNotAllowed(response);
     const session = await store.readSession(sessionMatch[1]);
-    return session ? jsonResponse(response, 200, { session }) : jsonResponse(response, 404, { error: "会话不存在" });
+    if (!session) return jsonResponse(response, 404, { error: "会话不存在" });
+    session.trace = await store.readSessionTrace(session.id);
+    return jsonResponse(response, 200, { session });
   }
   const appliedMatch = url.pathname.match(/^\/api\/ai\/sessions\/([0-9a-f-]+)\/applied$/i);
   if (appliedMatch) {
@@ -514,10 +599,7 @@ async function handleRequest(request, response) {
     if (request.method !== "POST") return methodNotAllowed(response);
     const job = await store.readJob(cancelMatch[1]);
     if (!job) return jsonResponse(response, 404, { error: "任务不存在" });
-    job.cancelled = true;
-    job.status = "cancelling";
-    await store.saveJob(job);
-    job.sessionIds.forEach((sessionId) => runningSessions.get(sessionId)?.kill("SIGTERM"));
+    await cancelJob(job);
     return jsonResponse(response, 202, { job });
   }
   const todoMatch = url.pathname.match(/^\/api\/ai\/todos\/([0-9a-f-]+)\/answer$/i);

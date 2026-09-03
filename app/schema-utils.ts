@@ -6,8 +6,6 @@ import {
   Relationship,
   ROOT_FOLDER,
   SchemaTable,
-  SemanticRole,
-  Sensitivity,
   UNCLASSIFIED,
 } from "./data";
 
@@ -41,19 +39,6 @@ export function toCamelCase(value: string) {
   return pascal ? pascal.charAt(0).toLowerCase() + pascal.slice(1) : "field";
 }
 
-export function inferSemanticRole(columnName: string): SemanticRole {
-  const name = columnName.toUpperCase();
-  if (/(^|_)ID$/.test(name) || /_ID_/.test(name)) return "identifier";
-  if (/(^|_)NAME$/.test(name)) return "name";
-  if (/(DATE|TIME|TIMESTAMP)$/.test(name)) return "time";
-  if (/(AMOUNT|BALANCE|PRICE|FEE|COST)$/.test(name)) return "amount";
-  if (/(COUNT|NUM|NUMBER|QTY|QUANTITY|TIMES)$/.test(name)) return "quantity";
-  if (/(STATUS|STATE|FLAG)$/.test(name)) return "status";
-  if (/(TYPE|CODE)$/.test(name)) return "code";
-  if (/(DESC|DESCRIPTION|REMARK|COMMENT)$/.test(name)) return "description";
-  return "other";
-}
-
 export function createDefaultAnnotation(column: Pick<Column, "name">): ColumnAnnotation {
   return {
     included: true,
@@ -64,12 +49,7 @@ export function createDefaultAnnotation(column: Pick<Column, "name">): ColumnAnn
     isDisplayName: false,
     isSemantic: false,
     isCode: false,
-    semanticRole: inferSemanticRole(column.name),
-    tags: [],
-    unit: "",
     enumValues: [],
-    valueRange: "",
-    sensitivity: "none",
     enumRef: "",
     enumDescription: "",
   };
@@ -97,8 +77,6 @@ function enumArray(value: unknown): EnumValue[] {
 export function migrateColumn(column: Column): Column {
   const defaults = createDefaultAnnotation(column);
   const source = column.annotation as Partial<ColumnAnnotation> | undefined;
-  const semanticRoles: SemanticRole[] = ["identifier", "name", "time", "amount", "quantity", "status", "code", "description", "other"];
-  const sensitivities: Sensitivity[] = ["none", "internal", "sensitive", "restricted"];
   return {
     ...column,
     annotation: {
@@ -110,12 +88,7 @@ export function migrateColumn(column: Column): Column {
       isDisplayName: source?.isDisplayName === true,
       isSemantic: source?.isSemantic === true,
       isCode: source?.isCode === true,
-      semanticRole: semanticRoles.includes(source?.semanticRole as SemanticRole) ? source!.semanticRole as SemanticRole : defaults.semanticRole,
-      tags: stringArray(source?.tags),
-      unit: typeof source?.unit === "string" ? source.unit.trim() : "",
       enumValues: enumArray(source?.enumValues),
-      valueRange: typeof source?.valueRange === "string" ? source.valueRange.trim() : "",
-      sensitivity: sensitivities.includes(source?.sensitivity as Sensitivity) ? source!.sensitivity as Sensitivity : "none",
       enumRef: typeof source?.enumRef === "string" ? source.enumRef.trim() : "",
       enumDescription: typeof source?.enumDescription === "string" ? source.enumDescription.trim() : "",
     },
@@ -286,7 +259,7 @@ export function buildExportFiles(tables: SchemaTable[]): ExportFile[] {
       ...(table.classAliases.length ? { aliases: table.classAliases } : {}),
       attributes: included.map((column) => {
         const annotation = migrateColumn(column).annotation!;
-        if (annotation.enumRef) {
+        if (annotation.enumRef && annotation.enumValues.length > 0) {
           const enumName = safeSegment(annotation.enumRef);
           const key = `${domain}/${enumName}`;
           const current = enumFiles.get(key);

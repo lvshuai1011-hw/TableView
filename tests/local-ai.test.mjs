@@ -99,10 +99,13 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /本地参考资料/);
   assert.match(prompt, /\/srv\/reference\/repo/);
   assert.match(prompt, /人工回答：是/);
-  assert.match(prompt, /不能凭空增加数据库列/);
-  assert.match(prompt, /仍没有明确依据/);
+  assert.match(prompt, /不能创造数据库列/);
+  assert.match(prompt, /仍无明确依据/);
   assert.match(prompt, /checkedSources/);
   assert.match(prompt, /PE_FREE_UNIT_TYPE\.json/);
+  assert.match(prompt, /classAliases 必须提供 4–12 个/);
+  assert.match(prompt, /enum_ref/);
+  assert.match(prompt, /English Description/);
 });
 
 test("renders an editable prompt template and rejects unknown placeholders", () => {
@@ -201,12 +204,13 @@ const sessionFlag = args.indexOf("--session-id");
 const resumeFlag = args.indexOf("--resume");
 const sessionId = sessionFlag >= 0 ? args[sessionFlag + 1] : args[resumeFlag + 1];
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: sessionId }));
-console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read" }] } }));
+console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "先读取当前表与关系索引。" }, { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "dataset-context.json" } }] } }));
+console.log(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "已读取当前表与关联表清单" }] } }));
 console.log(JSON.stringify({ type: "result", is_error: false, structured_output: {
   reply: "第一版已经生成",
-  draft: { className: "FreeUnitInstance", classDescription: "免费资源实例", classAliases: [], confidence: "high", columns: [
-    { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitInstanceID", aliases: ["主键"], detailedDescription: "唯一标识", isLocalId: true, isDisplayName: false, isSemantic: false, isCode: false, semanticRole: "identifier", tags: [], unit: "", enumValues: [], valueRange: "", sensitivity: "none", enumRef: "", enumDescription: "", confidence: "high", reason: "主键" },
-    { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: [], detailedDescription: "类型标识", isLocalId: false, isDisplayName: false, isSemantic: false, isCode: false, semanticRole: "identifier", tags: [], unit: "", enumValues: [], valueRange: "", sensitivity: "none", enumRef: "", enumDescription: "", confidence: "medium", reason: "字段名" }
+  draft: { className: "FreeUnitInstance", classDescription: "中文描述：免费资源实例代表归属于特定业务属主、可在有效周期内用于抵扣对应通信消费的权益余额，是免费资源授予、消耗、滚存与失效管理中的核心业务对象，并通过资源类型界定可抵扣的服务范围与度量口径。\\n\\nEnglish Description: A free unit instance represents a benefit balance granted to a specific business owner and available for offsetting eligible telecommunications usage during its validity period. It is the central business object for grant, consumption, rollover, and expiry management, while its resource type defines the applicable service scope and measurement convention.", classAliases: ["Free resource instance", "Bonus resource", "免费资源实例", "赠送资源"], confidence: "high", columns: [
+    { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitInstanceID", aliases: ["Free unit instance identifier", "免费资源实例标识"], detailedDescription: "中文描述：免费资源实例标识用于在免费资源业务范围内唯一识别一份已经授予某个属主的资源权益，并作为该权益在余额变化、使用抵扣、滚存衔接和生命周期追踪中的稳定关联依据。\\n\\nEnglish Description: The free unit instance identifier uniquely identifies a granted resource entitlement within the free-unit business scope and serves as the stable reference for balance changes, usage offsets, rollover continuity, and lifecycle tracking.", isLocalId: true, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "high", reason: "input-table.json 主键及 remark" },
+    { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: ["Free unit type identifier", "免费资源类型标识"], detailedDescription: "中文描述：免费资源类型标识指明当前免费资源实例所属的资源类别，用于确定该权益能够抵扣的业务使用类型、对应度量口径以及适用的资源管理规则，并把实例关联到统一的类型定义。\\n\\nEnglish Description: The free unit type identifier specifies the resource category of the current free-unit instance, determining the eligible usage category, measurement convention, and applicable resource-management rules while linking the instance to a shared type definition.", isLocalId: false, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "medium", reason: "字段 remark 与父表关系" }
   ] },
   todos: []
 } }));
@@ -263,11 +267,23 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(completed.session.draft.columns[0].isLocalId, true);
     const sessions = await (await fetch(`${origin}/api/ai/sessions`)).json();
     assert.equal(sessions.sessions.length, 1);
+    const contextPath = path.join(temp, "data", "sessions", `${completed.session.id}.workspace`, "dataset-context.json");
     const datasetContext = JSON.parse(await readFile(
-      path.join(temp, "data", "sessions", `${completed.session.id}.workspace`, "dataset-context.json"),
+      contextPath,
       "utf8",
     ));
     assert.equal(datasetContext.currentTable.tableName, "PE_FREE_UNIT");
+    const sessionDetail = await (await fetch(`${origin}/api/ai/sessions/${completed.session.id}`)).json();
+    assert.deepEqual(sessionDetail.session.trace.map((item) => item.kind), ["system", "assistant", "tool_use", "tool_result", "result"]);
+    assert.match(sessionDetail.session.trace.find((item) => item.kind === "tool_use").detail, /dataset-context\.json/);
+    const deleteResponse = await fetch(`${origin}/api/ai/sessions`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionIds: [completed.session.id] }),
+    });
+    assert.equal(deleteResponse.status, 200);
+    assert.equal((await (await fetch(`${origin}/api/ai/sessions`)).json()).sessions.length, 0);
+    await assert.rejects(readFile(contextPath, "utf8"));
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     Object.entries(previous).forEach(([key, value]) => {
