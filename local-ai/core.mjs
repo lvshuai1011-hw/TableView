@@ -109,7 +109,7 @@ export const annotationOutputSchema = {
             required: [
               "name", "included", "entityColumn", "aliases", "detailedDescription",
               "isLocalId", "isDisplayName", "isSemantic", "isCode", "enumValues", "enumRef",
-              "enumDescription", "confidence", "reason",
+              "enumDescription", "confidence", "analysisSummary", "reason",
             ],
             properties: {
               name: { type: "string" },
@@ -141,6 +141,7 @@ export const annotationOutputSchema = {
               enumRef: { type: "string" },
               enumDescription: { type: "string" },
               confidence: { type: "string", enum: ["high", "medium", "low"] },
+              analysisSummary: { type: "string", minLength: 80 },
               reason: { type: "string", minLength: 1 },
             },
           },
@@ -184,6 +185,7 @@ function normalizeColumnDraft(value, column) {
     enumRef: stringValue(source.enumRef, fallback.enumRef),
     enumDescription: stringValue(source.enumDescription, fallback.enumDescription),
     confidence: CONFIDENCE_LEVELS.has(source.confidence) ? source.confidence : "medium",
+    analysisSummary: stringValue(source.analysisSummary, stringValue(source.reason)),
     reason: stringValue(source.reason),
   };
 }

@@ -64,7 +64,7 @@ test("normalizes Claude output against imported columns and creates a duplicate-
       classAliases: ["免费资源", "免费资源"],
       confidence: "high",
       columns: [
-        { name: "FREE_UNIT_ID", entityColumn: "freeUnitID", included: true, confidence: "high" },
+        { name: "FREE_UNIT_ID", entityColumn: "freeUnitID", included: true, confidence: "high", reason: "旧版草稿只保存了主键与 remark 依据" },
         { name: "FREE_UNIT_TYPE_ID", entityColumn: "freeUnitID", included: true, confidence: "low" },
         { name: "NOT_IMPORTED", entityColumn: "invented", included: true, confidence: "high" },
       ],
@@ -75,6 +75,7 @@ test("normalizes Claude output against imported columns and creates a duplicate-
   assert.equal(result.draft.tableName, table.tableName);
   assert.deepEqual(result.draft.classAliases, ["免费资源"]);
   assert.deepEqual(result.draft.columns.map((column) => column.name), ["FREE_UNIT_ID", "FREE_UNIT_TYPE_ID"]);
+  assert.equal(result.draft.columns[0].analysisSummary, "旧版草稿只保存了主键与 remark 依据");
   assert.equal(result.todos.length, 1);
   assert.equal(result.todos[0].blocking, true);
   assert.match(result.todos[0].question, /属性名 freeUnitID/);
@@ -105,6 +106,7 @@ test("builds a direct-file prompt with human clarifications", () => {
   assert.match(prompt, /PE_FREE_UNIT_TYPE\.json/);
   assert.match(prompt, /classAliases 必须提供 4–12 个/);
   assert.match(prompt, /enum_ref/);
+  assert.match(prompt, /analysisSummary/);
   assert.match(prompt, /English Description/);
 });
 
@@ -209,8 +211,8 @@ console.log(JSON.stringify({ type: "user", message: { content: [{ type: "tool_re
 console.log(JSON.stringify({ type: "result", is_error: false, structured_output: {
   reply: resumeFlag >= 0 ? "已在原 Session 完成第二轮修订" : "第一版已经生成",
   draft: { className: "FreeUnitInstance", classDescription: "中文描述：免费资源实例代表归属于特定业务属主、可在有效周期内用于抵扣对应通信消费的权益余额，是免费资源授予、消耗、滚存与失效管理中的核心业务对象，并通过资源类型界定可抵扣的服务范围与度量口径。\\n\\nEnglish Description: A free unit instance represents a benefit balance granted to a specific business owner and available for offsetting eligible telecommunications usage during its validity period. It is the central business object for grant, consumption, rollover, and expiry management, while its resource type defines the applicable service scope and measurement convention.", classAliases: ["Free resource instance", "Bonus resource", "免费资源实例", "赠送资源"], confidence: "high", columns: [
-    { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitInstanceID", aliases: ["Free unit instance identifier", "免费资源实例标识"], detailedDescription: "中文描述：免费资源实例标识用于在免费资源业务范围内唯一识别一份已经授予某个属主的资源权益，并作为该权益在余额变化、使用抵扣、滚存衔接和生命周期追踪中的稳定关联依据。\\n\\nEnglish Description: The free unit instance identifier uniquely identifies a granted resource entitlement within the free-unit business scope and serves as the stable reference for balance changes, usage offsets, rollover continuity, and lifecycle tracking.", isLocalId: true, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "high", reason: "input-table.json 主键及 remark" },
-    { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: ["Free unit type identifier", "免费资源类型标识"], detailedDescription: "中文描述：免费资源类型标识指明当前免费资源实例所属的资源类别，用于确定该权益能够抵扣的业务使用类型、对应度量口径以及适用的资源管理规则，并把实例关联到统一的类型定义。\\n\\nEnglish Description: The free unit type identifier specifies the resource category of the current free-unit instance, determining the eligible usage category, measurement convention, and applicable resource-management rules while linking the instance to a shared type definition.", isLocalId: false, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "medium", reason: "字段 remark 与父表关系" }
+    { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitInstanceID", aliases: ["Free unit instance identifier", "免费资源实例标识"], detailedDescription: "中文描述：免费资源实例标识用于在免费资源业务范围内唯一识别一份已经授予某个属主的资源权益，并作为该权益在余额变化、使用抵扣、滚存衔接和生命周期追踪中的稳定关联依据。\\n\\nEnglish Description: The free unit instance identifier uniquely identifies a granted resource entitlement within the free-unit business scope and serves as the stable reference for balance changes, usage offsets, rollover continuity, and lifecycle tracking.", isLocalId: true, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "high", analysisSummary: "该字段是 PE_FREE_UNIT 的主键，表达一份免费资源实例在本类范围内的身份，因此命名为 freeUnitInstanceID，并开启 isLocalId。中英文别名沿用表名与字段中文名所确认的业务概念。它不是业务编码、展示名称或枚举值，相关开关保持关闭。当前依据明确，没有发现需要人工澄清的边界。", reason: "input-table.json 主键及 remark" },
+    { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: ["Free unit type identifier", "免费资源类型标识"], detailedDescription: "中文描述：免费资源类型标识指明当前免费资源实例所属的资源类别，用于确定该权益能够抵扣的业务使用类型、对应度量口径以及适用的资源管理规则，并把实例关联到统一的类型定义。\\n\\nEnglish Description: The free unit type identifier specifies the resource category of the current free-unit instance, determining the eligible usage category, measurement convention, and applicable resource-management rules while linking the instance to a shared type definition.", isLocalId: false, isDisplayName: false, isSemantic: false, isCode: false, enumValues: [], enumRef: "", enumDescription: "", confidence: "medium", analysisSummary: "该字段通过外键关联免费资源类型，表达实例所属的类型身份，因此采用 freeUnitTypeID，而不是把它解释为类型名称。别名保持在已确认的类型标识语义内。它不是当前类的本地身份、展示名称或业务编码，也没有有限取值证据，所以不启用对应开关和枚举。父表资料可确认关联对象，但更细的类型规则仍需以领域资料为准。", reason: "字段 remark 与父表关系" }
   ] },
   todos: []
 } }));
@@ -265,6 +267,7 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(completed.session.datasetId, dataset.id);
     assert.equal(completed.session.draft.className, "FreeUnitInstance");
     assert.equal(completed.session.draft.columns[0].isLocalId, true);
+    assert.match(completed.session.draft.columns[0].analysisSummary, /主键/);
     const sessions = await (await fetch(`${origin}/api/ai/sessions`)).json();
     assert.equal(sessions.sessions.length, 1);
     const contextPath = path.join(temp, "data", "sessions", `${completed.session.id}.workspace`, "dataset-context.json");
@@ -317,6 +320,7 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(manualReview.session.turnCount, 2);
     assert.equal(manualReview.session.draft.className, "FreeUnitInstanceReviewed");
     assert.equal(manualReview.session.draft.columns[0].entityColumn, "reviewedFreeUnitInstanceID");
+    assert.equal(manualReview.session.draft.columns[0].analysisSummary, continued.session.draft.columns[0].analysisSummary);
     assert.match(manualReview.session.messages.at(-1).content, /人工修改了类与 FREE_UNIT_ID/);
     assert.equal(manualReview.session.trace.length, 10);
     const deleteResponse = await fetch(`${origin}/api/ai/sessions`, {

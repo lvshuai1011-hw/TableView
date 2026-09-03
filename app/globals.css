@@ -710,6 +710,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-draft-fields article > div:first-child [data-slot="badge"] { margin-left: auto; font-size: 9px; }
 .ai-draft-fields article p { margin: 0; color: #617587; font-size: 12px; line-height: 1.55; }
 .ai-draft-fields article > small { color: #8b98a4; font-size: 10px; }
+.ai-field-analysis { display: grid; gap: 6px; padding: 10px 11px; color: #465f72; background: #f3f8fb; border: 1px solid #dce8ee; border-radius: 7px; }
+.ai-field-analysis > div { display: flex; align-items: center; gap: 6px; color: #32627b; }
+.ai-field-analysis > div strong { font-size: 11px; }
+.ai-field-analysis > p { color: #4c6577 !important; font-size: 11px !important; line-height: 1.65 !important; white-space: pre-wrap; }
+.ai-draft-fields article > .ai-field-evidence { display: flex; align-items: flex-start; gap: 5px; color: #758893; line-height: 1.55; }
+.ai-field-evidence svg { flex: 0 0 auto; margin-top: 2px; }
 .ai-draft-flags { display: flex; flex-wrap: wrap; gap: 5px; }
 .ai-draft-flags span { padding: 3px 6px; color: #4e756f; background: #edf6f4; border-radius: 5px; font-size: 9px; }
 .ai-draft-fields article > .ai-draft-review-heading:first-child { display: flex; }

@@ -12,6 +12,7 @@ export type AiDataset = {
 export type AiColumnDraft = ColumnAnnotation & {
   name: string;
   confidence: AiConfidence;
+  analysisSummary: string;
   reason: string;
   enumValues: EnumValue[];
 };

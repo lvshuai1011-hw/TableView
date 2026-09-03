@@ -67,11 +67,25 @@ import type {
 } from "./ai-types";
 
 const REFERENCES_KEY = "schema-atlas.ai.reference-paths.v1";
-const PROMPT_KEY = "schema-atlas.ai.prompt-template.v3";
-const BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
+const PROMPT_KEY = "schema-atlas.ai.prompt-template.v4";
+const PREVIOUS_PROMPT_KEY = "schema-atlas.ai.prompt-template.v3";
+const BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v2";
+const PREVIOUS_BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
 const DEFAULT_BATCH_INSTRUCTION = DEFAULT_BATCH_INSTRUCTION_TEXT.trim();
 const DEFAULT_TABLE_INSTRUCTION = DEFAULT_TABLE_INSTRUCTION_TEXT.trim();
 const PROMPT_VARIABLES = ["table_name", "mode", "dataset_context", "reference_paths", "clarifications", "user_message"];
+
+function withFieldAnalysisRequirement(value: string) {
+  const prompt = value.trim();
+  if (!prompt || /\banalysisSummary\b/.test(prompt)) return prompt;
+  return `${prompt}\n\n补充的逐字段审核输出要求：每个字段必须填写 analysisSummary，用 3–6 句中文解释业务理解、entityColumn 与 aliases 命名、布尔开关、枚举、外键语义及不确定性；reason 只列可回查的具体证据来源。`;
+}
+
+function withBatchFieldAnalysisRequirement(value: string) {
+  const instruction = value.trim();
+  if (!instruction || instruction.includes("AI 标注分析")) return instruction;
+  return `${instruction}\n每个字段还必须生成可供人工审核的 AI 标注分析，并说明命名、别名、开关、枚举、关系语义与不确定性。`;
+}
 
 function statusLabel(status: string) {
   return ({
@@ -309,8 +323,12 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
       if (!active) return;
       try {
         setReferenceText(window.localStorage.getItem(REFERENCES_KEY) ?? "");
-        setPromptTemplate(window.localStorage.getItem(PROMPT_KEY) || DEFAULT_ANNOTATION_PROMPT.trim());
-        setBatchInstruction(window.localStorage.getItem(BATCH_INSTRUCTION_KEY) || DEFAULT_BATCH_INSTRUCTION);
+        const storedPrompt = window.localStorage.getItem(PROMPT_KEY);
+        const previousPrompt = window.localStorage.getItem(PREVIOUS_PROMPT_KEY);
+        setPromptTemplate(storedPrompt || (previousPrompt ? withFieldAnalysisRequirement(previousPrompt) : DEFAULT_ANNOTATION_PROMPT.trim()));
+        const storedBatchInstruction = window.localStorage.getItem(BATCH_INSTRUCTION_KEY);
+        const previousBatchInstruction = window.localStorage.getItem(PREVIOUS_BATCH_INSTRUCTION_KEY);
+        setBatchInstruction(storedBatchInstruction || (previousBatchInstruction ? withBatchFieldAnalysisRequirement(previousBatchInstruction) : DEFAULT_BATCH_INSTRUCTION));
       } catch { /* preferences are optional */ }
       setPreferencesReady(true);
     });
@@ -421,7 +439,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const prepareClaudeRevision = (fieldName?: string) => {
     if (!activeTable) return;
     const request = fieldName
-      ? `请只重新审核字段 ${activeTable.tableName}.${fieldName}。请结合导入字段资料、外键关系和已配置参考资料，修订它的 attr_name、详细中英文业务语义、aliases、布尔标志及枚举配置；不要改动无关字段。`
+      ? `请只重新审核字段 ${activeTable.tableName}.${fieldName}。请结合导入字段资料、外键关系和已配置参考资料，修订它的 attr_name、详细中英文业务语义、aliases、布尔标志及枚举配置，并同步更新供人工审核的 analysisSummary 和证据 reason；不要改动无关字段。`
       : `请只重新审核表 ${activeTable.tableName} 的类级标注。请结合已配置参考资料，修订 class_name、详细中英文业务语义和 aliases；不要改动无关字段。`;
     setChatMessage(request);
     queueMicrotask(() => workComposerRef.current?.focus());
@@ -685,7 +703,11 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
                         <div className="ai-draft-review-heading"><div><code>{column.name}</code><strong>→</strong><code>{column.entityColumn}</code><Badge variant="outline" className={`confidence-${column.confidence}`}>{column.confidence === "high" ? "高" : column.confidence === "low" ? "低" : "中"}</Badge></div><div><button type="button" onClick={() => prepareClaudeRevision(column.name)}><MessageSquareText size={12} />AI 修订</button><button type="button" onClick={() => setDraftFieldEditorName(column.name)} disabled={draftSaving}><FilePenLine size={12} />人工编辑</button></div></div>
                         <p>{column.detailedDescription || "暂无详细描述"}</p>
                         <div className="ai-draft-flags">{!column.included && <span>不导出</span>}{column.isLocalId && <span>LOCAL ID</span>}{column.isCode && <span>CODE</span>}{column.isDisplayName && <span>DISPLAY NAME</span>}{column.isSemantic && <span>SEMANTIC</span>}{column.enumRef && <span>ENUM · {column.enumRef}</span>}{column.aliases.map((alias) => <span key={alias}>{alias}</span>)}</div>
-                        {column.reason && <small>{column.reason}</small>}
+                        <section className="ai-field-analysis">
+                          <div><Sparkles size={13} /><strong>AI 标注分析</strong></div>
+                          <p>{column.analysisSummary || column.reason || "旧版草稿未记录逐字段分析，可点击“AI 修订”补充。"}</p>
+                        </section>
+                        {column.reason && <small className="ai-field-evidence"><FileText size={11} />证据依据：{column.reason}</small>}
                         {fieldTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}
                       </article>;
                     })}</div></div>

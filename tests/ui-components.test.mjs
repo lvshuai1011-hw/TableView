@@ -327,6 +327,7 @@ test("applies an AI draft without mutating the imported table structure", async 
       isLocalId: column.name === "FREE_UNIT_ID",
       isCode: column.name === "ORIGIN_TYPE",
       confidence: "high",
+      analysisSummary: "该字段的业务含义、命名、别名、布尔开关与枚举判断均基于测试输入，用于验证审核元数据不会进入正式导出结构。",
       reason: "测试草稿",
     })),
   };
@@ -337,6 +338,7 @@ test("applies an AI draft without mutating the imported table structure", async 
   assert.equal(merged.className, "FreeUnitInstance");
   assert.equal(merged.columns[0].annotation.isLocalId, true);
   assert.equal(merged.columns[1].annotation.isCode, true);
+  assert.equal("analysisSummary" in merged.columns[0].annotation, false);
   assert.deepEqual(merged.columns.map((column) => column.name), source.columns.map((column) => column.name));
 });
 
