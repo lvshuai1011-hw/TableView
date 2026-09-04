@@ -1265,6 +1265,7 @@ function InspectorSheet({
   onEditTable,
   onOpenAi,
   onResetAnnotations,
+  onExportAnnotation,
   onExportChanges,
   onRestoreChange,
 }: {
@@ -1281,6 +1282,7 @@ function InspectorSheet({
   onEditTable: (tableName: string) => void;
   onOpenAi: (tableName: string) => void;
   onResetAnnotations: (tableName: string) => void;
+  onExportAnnotation: (tableName: string) => void;
   onExportChanges: (tableName: string) => void;
   onRestoreChange: (record: ChangeRecord) => void;
 }) {
@@ -1321,6 +1323,7 @@ function InspectorSheet({
         <div className="inspector-actions">
           <Button variant="outline" className="ai-from-sheet" onClick={() => onOpenAi(selectedTable.tableName)}><Sparkles size={15} />AI 审核此表</Button>
           <Button className="focus-from-sheet" onClick={() => onFocus(selectedTable.tableName)}><Focus size={15} />聚焦该表关系</Button>
+          <Button variant="outline" className="export-annotation-from-sheet" onClick={() => onExportAnnotation(selectedTable.tableName)}><FileArchive size={15} />导出当前本体</Button>
           <Button variant="outline" className="reset-annotations-from-sheet" disabled={selectedAnnotationStatus === "unannotated"} onClick={() => onResetAnnotations(selectedTable.tableName)}><RotateCcw size={15} />清空标注</Button>
           <Button variant="outline" className="delete-from-sheet" onClick={() => onDelete(selectedTable.tableName)}><Trash2 size={15} />删除此表</Button>
         </div>
@@ -2054,14 +2057,23 @@ export default function Home() {
     anchor.click();
     URL.revokeObjectURL(url);
   };
-  const exportAnnotations = () => {
-    const errors = validateExportConfiguration(tables);
+  const downloadAnnotations = (targetTables: SchemaTable[], fileName: string, successLabel: string) => {
+    const errors = validateExportConfiguration(targetTables);
     if (errors.length) return toast.error("导出前需要修正配置", { description: errors.slice(0, 3).join("；") });
-    const files = buildExportFiles(tables);
+    const files = buildExportFiles(targetTables);
     const zip = createZip(files);
     const buffer = zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength) as ArrayBuffer;
-    downloadBlob(new Blob([buffer], { type: "application/zip" }), `schema-atlas-annotations-${new Date().toISOString().slice(0, 10)}.zip`);
-    toast.success(`已导出 ${files.length} 个 JSON 文件`, { description: "包含 ontologies、rdb-mapping 及枚举目录。" });
+    downloadBlob(new Blob([buffer], { type: "application/zip" }), fileName);
+    toast.success(successLabel, { description: `共 ${files.length} 个 JSON 文件，包含 Ontology、RDB Mapping 及引用的枚举。` });
+  };
+  const exportAnnotations = () => {
+    downloadAnnotations(tables, `schema-atlas-annotations-${new Date().toISOString().slice(0, 10)}.zip`, `已导出全部 ${tables.length} 个本体`);
+  };
+  const exportSingleAnnotation = (tableName: string) => {
+    const table = tables.find((item) => item.tableName === tableName);
+    if (!table) return toast.error("无法导出", { description: "当前表已经不存在，请刷新后重试。" });
+    const archiveName = (table.className || table.tableName).replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-");
+    downloadAnnotations([table], `${archiveName}-annotation-${new Date().toISOString().slice(0, 10)}.zip`, `已导出本体 ${table.className}`);
   };
   const exportTableAudit = (tableName: string) => {
     const group = buildTableChangeHistoryExport(changeHistory, tableName);
@@ -2190,6 +2202,7 @@ export default function Home() {
       onEditTable={(tableName) => { setTableConfigError(""); setTableConfigTarget(tableName); }}
       onOpenAi={(tableName) => { setInspector(null); setAiTableTarget(tableName); setAiOpen(true); }}
       onResetAnnotations={setAnnotationResetTarget}
+      onExportAnnotation={exportSingleAnnotation}
       onExportChanges={exportTableAudit}
       onRestoreChange={setRestoreTarget}
     />

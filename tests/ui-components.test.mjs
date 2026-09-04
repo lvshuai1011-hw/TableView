@@ -196,6 +196,70 @@ test("normalizes missing level-one domains and exports the requested ontology la
   assert.deepEqual([...zip.slice(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
 });
 
+test("offers a table-scoped annotation export without depending on other tables", async () => {
+  const source = await readFile(path.join(root, "app", "page.tsx"), "utf8");
+  const { buildExportFiles, migrateTables, validateExportConfiguration } = await vite.ssrLoadModule("/app/schema-utils.ts");
+  const tables = migrateTables([
+    {
+      tableName: "READY_TABLE",
+      className: "ReadyEntity",
+      classDescription: "中文描述：已完成实体。\n\nEnglish Description: A completed entity.",
+      classAliases: ["Ready entity", "已完成实体"],
+      description: "",
+      folder: "Ready",
+      domain0: "Demo",
+      domain1: "Ready",
+      columns: [{
+        name: "STATUS",
+        description: "状态",
+        dataType: "VARCHAR2(1)",
+        length: "1",
+        isPrimaryKey: false,
+        nullable: false,
+        remark: "",
+        annotation: {
+          included: true,
+          entityColumn: "status",
+          aliases: ["Status", "状态"],
+          detailedDescription: "中文描述：实体状态。\n\nEnglish Description: The entity status.",
+          isLocalId: false,
+          isDisplayName: false,
+          isSemantic: false,
+          isCode: false,
+          enumRef: "Status",
+          enumDescription: "状态枚举。Status enumeration.",
+          enumValues: [{ value: "A", aliases: ["Active", "有效"], description: "有效。Active." }],
+        },
+      }],
+      foreignKeys: [],
+      referencedBy: [],
+    },
+    {
+      tableName: "INCOMPLETE_TABLE",
+      className: "IncompleteEntity",
+      classDescription: "",
+      classAliases: [],
+      description: "",
+      folder: "Incomplete",
+      domain0: "Demo",
+      domain1: "Incomplete",
+      columns: [],
+      foreignKeys: [],
+      referencedBy: [],
+    },
+  ]);
+
+  assert.deepEqual(validateExportConfiguration([tables[0]]), []);
+  assert.ok(validateExportConfiguration(tables).length > 0);
+  assert.deepEqual(buildExportFiles([tables[0]]).map((file) => file.path), [
+    "ontologies/Demo/entity-classes/ReadyEntity.json",
+    "rdb-mapping/Demo/entity-classes/ReadyEntity-rdb-mapping.json",
+    "ontologies/Demo/enums/Status.json",
+  ]);
+  assert.match(source, />导出当前本体</);
+  assert.match(source, /downloadAnnotations\(\[table\]/);
+});
+
 test("writes enum references and definitions as separate files", async () => {
   const { buildExportFiles, migrateTables } = await vite.ssrLoadModule("/app/schema-utils.ts");
   const [table] = migrateTables([{
