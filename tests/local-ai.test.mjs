@@ -264,6 +264,22 @@ test("reconciles deleted fields and tables without deleting Session history", ()
   assert.deepEqual(fieldDeletion.session.removedFieldNames, ["FREE_UNIT_TYPE_ID"]);
   assert.equal(fieldDeletion.session.messages[0].content, "已有完整标注");
 
+  const fieldRestoration = reconcileSessionWithTables(fieldDeletion.session, [table], timestamp);
+  assert.equal(fieldRestoration.session.status, "stale");
+  assert.equal(fieldRestoration.session.staleReason, "fields_restored_requires_review");
+  assert.equal(fieldRestoration.session.todos.find((todo) => todo.id === "field-todo").status, "open");
+  assert.equal(fieldRestoration.session.todos.find((todo) => todo.id === "field-todo").dismissedReason, undefined);
+  assert.equal(fieldRestoration.session.todos.find((todo) => todo.id === "field-todo").lastDismissedReason, "field_deleted");
+  assert.deepEqual(fieldRestoration.session.draft.columns.map((column) => column.name), ["FREE_UNIT_ID", "FREE_UNIT_TYPE_ID"]);
+
+  const legacyRestoredSession = {
+    ...fieldRestoration.session,
+    todos: fieldDeletion.session.todos,
+  };
+  const migratedRestoration = reconcileSessionWithTables(legacyRestoredSession, [table], timestamp);
+  assert.equal(migratedRestoration.changed, true);
+  assert.equal(migratedRestoration.session.todos.find((todo) => todo.id === "field-todo").status, "open");
+
   const tableDeletion = reconcileSessionWithTables(fieldDeletion.session, [], timestamp);
   assert.equal(tableDeletion.session.status, "stale");
   assert.equal(tableDeletion.session.staleReason, "table_deleted");
@@ -276,9 +292,16 @@ test("reconciles deleted fields and tables without deleting Session history", ()
   assert.equal(tableRestoration.session.staleReason, "table_restored_requires_review");
   assert.deepEqual(tableRestoration.session.restoredFieldNames, ["FREE_UNIT_TYPE_ID"]);
   assert.deepEqual(tableRestoration.session.draft.columns.map((column) => column.name), ["FREE_UNIT_ID", "FREE_UNIT_TYPE_ID"]);
+  assert.equal(tableRestoration.session.todos.find((todo) => todo.id === "field-todo").status, "open");
+  assert.equal(tableRestoration.session.todos.find((todo) => todo.id === "table-todo").status, "open");
   const repeated = reconcileSessionWithTables(tableRestoration.session, [table], timestamp);
   assert.equal(repeated.changed, false);
   assert.equal(repeated.session.messages.length, tableRestoration.session.messages.length);
+
+  const secondFieldDeletion = reconcileSessionWithTables(tableRestoration.session, [tableWithoutType], timestamp);
+  const secondFieldRestoration = reconcileSessionWithTables(secondFieldDeletion.session, [table], timestamp);
+  assert.equal(secondFieldRestoration.session.todos.find((todo) => todo.id === "field-todo").status, "open");
+  assert.deepEqual(secondFieldRestoration.session.draft.columns.map((column) => column.name), ["FREE_UNIT_ID", "FREE_UNIT_TYPE_ID"]);
 });
 
 test("dataset sync persists reconciliation while retaining the historical Session", async () => {
@@ -326,6 +349,13 @@ test("dataset sync persists reconciliation while retaining the historical Sessio
     assert.equal(afterTableDelete.staleReason, "table_deleted");
     assert.ok(afterTableDelete.draft);
     assert.equal((await store.listSessions()).length, 1);
+
+    await store.syncDataset([table]);
+    const afterTableRestore = await store.readSession(session.id);
+    assert.equal(afterTableRestore.status, "stale");
+    assert.equal(afterTableRestore.staleReason, "table_restored_requires_review");
+    assert.equal(afterTableRestore.todos[0].status, "open");
+    assert.equal((await store.listSessions())[0].todoCount, 1);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

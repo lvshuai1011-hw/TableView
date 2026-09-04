@@ -52,6 +52,9 @@ export type AiTodo = {
   answeredAt: string | null;
   dismissedAt?: string | null;
   dismissedReason?: "field_deleted" | "table_deleted";
+  restoredAt?: string | null;
+  lastDismissedAt?: string | null;
+  lastDismissedReason?: "field_deleted" | "table_deleted" | null;
 };
 
 export type AiActivity = { id: string; label: string; at: string };

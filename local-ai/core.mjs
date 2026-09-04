@@ -209,6 +209,22 @@ function dismissTodo(todo, reason, at) {
   };
 }
 
+function restoreTodo(todo, at) {
+  if (todo.status !== "dismissed") return todo;
+  const restored = {
+    ...todo,
+    status: "open",
+    answer: "",
+    answeredAt: null,
+    restoredAt: at,
+    lastDismissedAt: todo.dismissedAt ?? null,
+    lastDismissedReason: todo.dismissedReason ?? null,
+  };
+  delete restored.dismissedAt;
+  delete restored.dismissedReason;
+  return restored;
+}
+
 function uniqueNames(values) {
   return [...new Set((Array.isArray(values) ? values : []).map(stringValue).filter(Boolean))];
 }
@@ -258,18 +274,48 @@ export function reconcileSessionWithTables(value, rawTables, at = new Date().toI
     return { session: next, changed, draftChanged, tableDeleted: transitioned, removedFields: [] };
   }
 
+  const currentColumns = Array.isArray(table.columns) ? table.columns : [];
+  const currentNames = new Map(currentColumns.map((column) => [stringValue(column?.name).toUpperCase(), stringValue(column?.name)]));
   const wasTableDeleted = session.staleReason === "table_deleted";
+  const restorableTodos = next.todos.filter((todo) => {
+    if (todo.status !== "dismissed") return false;
+    if (todo.dismissedReason === "table_deleted") {
+      return todo.scope !== "field" || currentNames.has(stringValue(todo.fieldName).toUpperCase());
+    }
+    return todo.dismissedReason === "field_deleted"
+      && todo.scope === "field"
+      && currentNames.has(stringValue(todo.fieldName).toUpperCase());
+  });
+  const restorableTodoIds = new Set(restorableTodos.map((todo) => todo.id));
+  const restoredTodoFields = uniqueNames(restorableTodos
+    .filter((todo) => todo.scope === "field")
+    .map((todo) => todo.fieldName));
+  if (restorableTodos.length > 0) {
+    next.todos = next.todos.map((todo) => restorableTodoIds.has(todo.id) ? restoreTodo(todo, at) : todo);
+    changed = true;
+  }
+  const orphanedTableDeletedTodos = next.todos.filter((todo) => todo.status === "dismissed"
+    && todo.dismissedReason === "table_deleted"
+    && todo.scope === "field"
+    && !currentNames.has(stringValue(todo.fieldName).toUpperCase()));
+  if (orphanedTableDeletedTodos.length > 0) {
+    const orphanedIds = new Set(orphanedTableDeletedTodos.map((todo) => todo.id));
+    next.todos = next.todos.map((todo) => orphanedIds.has(todo.id)
+      ? { ...todo, dismissedReason: "field_deleted" }
+      : todo);
+    changed = true;
+  }
+  let restorationMessageCovered = false;
   if (wasTableDeleted) {
     markSessionStale(next, "table_restored_requires_review", at);
     next.messages.push(systemMessage(
-      `表 ${session.tableName} 已恢复到当前数据集，但此 Session 基于删除前结构；请继续原 Session 重新核对，或人工保存当前结构后再应用。`,
+      `表 ${session.tableName} 已恢复到当前数据集；${restorableTodos.length > 0 ? `${restorableTodos.length} 个仍适用的待澄清项已重新放回队列，` : ""}此 Session 基于删除前结构，请继续重新核对或人工保存当前结构后再应用。`,
       at,
     ));
+    restorationMessageCovered = true;
     changed = true;
   }
 
-  const currentColumns = Array.isArray(table.columns) ? table.columns : [];
-  const currentNames = new Map(currentColumns.map((column) => [stringValue(column?.name).toUpperCase(), stringValue(column?.name)]));
   const draftColumns = Array.isArray(next.draft?.columns) ? next.draft.columns : [];
   const draftNames = new Map(draftColumns.map((column) => [stringValue(column?.name).toUpperCase(), stringValue(column?.name)]));
   const removedFields = draftColumns
@@ -280,7 +326,12 @@ export function reconcileSessionWithTables(value, rawTables, at = new Date().toI
     .filter((todo) => todo.status === "open" && todo.scope === "field" && todo.fieldName
       && !currentNames.has(stringValue(todo.fieldName).toUpperCase()))
     .map((todo) => stringValue(todo.fieldName));
-  const previouslyRemovedNames = uniqueNames(session.removedFieldNames);
+  const previouslyRemovedNames = uniqueNames([
+    ...(session.removedFieldNames ?? []),
+    ...session.todos
+      .filter((todo) => todo.status === "dismissed" && todo.dismissedReason === "field_deleted")
+      .map((todo) => todo.fieldName),
+  ]);
   const newlyRemoved = uniqueNames([...removedFields, ...missingTodoFields])
     .filter((name) => !previouslyRemovedNames.includes(name));
 
@@ -320,26 +371,41 @@ export function reconcileSessionWithTables(value, rawTables, at = new Date().toI
     const nextReason = restoredFields.length > 0
       ? "fields_restored_requires_review"
       : "fields_added_requires_review";
-    const alreadyRecorded = [nextReason, "table_restored_requires_review"].includes(session.staleReason)
-      && addedFields.every((name) => uniqueNames(session.restoredFieldNames).includes(name));
-    if (!alreadyRecorded) {
-      if (!wasTableDeleted) markSessionStale(next, nextReason, at);
-      next.restoredFieldNames = uniqueNames([...(session.restoredFieldNames ?? []), ...addedFields]);
-      next.removedFieldNames = previouslyRemovedNames
-        .filter((name) => !restoredFields.some((restored) => restored.toUpperCase() === name.toUpperCase()));
-      next.draft = {
-        ...next.draft,
-        columns: [...next.draft.columns, ...addedColumns.map((column) => normalizeColumnDraft({}, column, { allowManualFlags: true }))],
-      };
-      draftChanged = true;
-      if (!wasTableDeleted) {
-        next.messages.push(systemMessage(
-          `${restoredFields.length > 0 ? "已恢复" : "已新增"}字段 ${addedFields.join("、")}；已按当前表结构补入草稿，继续原 Session 重新核对或人工保存后，才可再次应用。`,
-          at,
-        ));
-      }
-      changed = true;
+    if (!wasTableDeleted) markSessionStale(next, nextReason, at);
+    next.restoredFieldNames = uniqueNames([...(session.restoredFieldNames ?? []), ...addedFields]);
+    next.removedFieldNames = previouslyRemovedNames
+      .filter((name) => !restoredFields.some((restored) => restored.toUpperCase() === name.toUpperCase()));
+    next.draft = {
+      ...next.draft,
+      columns: [...next.draft.columns, ...addedColumns.map((column) => normalizeColumnDraft({}, column, { allowManualFlags: true }))],
+    };
+    draftChanged = true;
+    if (!wasTableDeleted) {
+      next.messages.push(systemMessage(
+        `${restoredFields.length > 0 ? "已恢复" : "已新增"}字段 ${addedFields.join("、")}；已按当前表结构补入草稿${restorableTodos.length > 0 ? `，并将 ${restorableTodos.length} 个相关待澄清项重新放回队列` : ""}，继续原 Session 重新核对或人工保存后才可应用。`,
+        at,
+      ));
+      restorationMessageCovered = true;
     }
+    changed = true;
+  }
+
+  if (restorableTodos.length > 0 && !restorationMessageCovered) {
+    if (!next.staleReason) {
+      markSessionStale(
+        next,
+        restorableTodos.some((todo) => todo.dismissedReason === "table_deleted")
+          ? "table_restored_requires_review"
+          : "fields_restored_requires_review",
+        at,
+      );
+    }
+    next.restoredFieldNames = uniqueNames([...(next.restoredFieldNames ?? []), ...restoredTodoFields]);
+    next.messages.push(systemMessage(
+      `已将 ${restorableTodos.length} 个因表或字段删除而暂停的待澄清项重新放回队列，请结合当前结构继续处理。`,
+      at,
+    ));
+    changed = true;
   }
 
   if (["needs_clarification", "draft_ready"].includes(next.status)) {

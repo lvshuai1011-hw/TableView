@@ -200,13 +200,17 @@ function SessionTrace({ session }: { session: AiSession }) {
 function SessionStructureNotice({ session }: { session: AiSession | AiSessionSummary }) {
   const removedFields = session.removedFieldNames ?? [];
   const restoredFields = session.restoredFieldNames ?? [];
+  const openTodoCount = "todos" in session
+    ? session.todos.filter((todo) => todo.status === "open").length
+    : session.todoCount;
+  const todoDetail = openTodoCount > 0 ? `仍适用的 ${openTodoCount} 个待澄清项已重新进入队列。` : "";
   let detail = "";
   if (session.staleReason === "table_deleted") {
     detail = "这张表已从当前数据集中删除。Session、完整对话和旧草稿仍保留，但不会再出现在待审核或待澄清队列。";
   } else if (session.staleReason === "table_restored_requires_review") {
-    detail = "这张表已经恢复，但当前 Session 基于删除前的结构。请继续原 Session 重新核对，或人工编辑并保存当前结构后再应用。";
+    detail = `这张表已经恢复，但当前 Session 基于删除前的结构。${todoDetail}请继续原 Session 重新核对，或人工编辑并保存当前结构后再应用。`;
   } else if (session.staleReason === "fields_restored_requires_review") {
-    detail = `字段 ${restoredFields.join("、") || "已删除字段"} 已恢复并按当前表结构补入草稿；重新核对或人工保存后才可应用。`;
+    detail = `字段 ${restoredFields.join("、") || "已删除字段"} 已恢复并按当前表结构补入草稿。${todoDetail}重新核对或人工保存后才可应用。`;
   } else if (session.staleReason === "fields_added_requires_review") {
     detail = `当前表新增了字段 ${restoredFields.join("、") || "（名称未记录）"}，并已补入草稿；重新核对或人工保存后才可应用。`;
   } else if (removedFields.length > 0) {

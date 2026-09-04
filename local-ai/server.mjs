@@ -200,9 +200,9 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
     const structured = parseStructuredResult(events);
     if (!structured) throw new Error("Claude Code 未返回符合约定的结构化标注");
     const result = normalizeStructuredOutput(structured, table, session.id);
-    const answeredTodos = session.todos.filter((todo) => todo.status === "answered");
+    const retainedTodos = session.todos.filter((todo) => ["answered", "dismissed"].includes(todo.status));
     session.draft = result.draft;
-    session.todos = [...answeredTodos, ...result.todos];
+    session.todos = [...retainedTodos, ...result.todos];
     session.messages.push(message("assistant", result.reply, { draftUpdated: true, todoCount: result.todos.length }));
     session.turnCount += 1;
     clearSessionStructureState(session);
