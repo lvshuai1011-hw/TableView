@@ -5,6 +5,7 @@ import {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
+  useCallback,
   useMemo,
   useEffect,
   useRef,
@@ -16,6 +17,8 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Cloud,
+  CloudOff,
   Database,
   Download,
   FileArchive,
@@ -135,11 +138,57 @@ import {
   settleTableAnnotationStatus,
   validateExportConfiguration,
 } from "./schema-utils";
+import {
+  readSharedWorkspaceData,
+  saveSharedWorkspaceData,
+  SharedWorkspaceConflict,
+  type SharedWorkspaceData,
+} from "./shared-workspace";
 
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 720;
 const MISSING_ID = "missing:endpoints";
 const TABLE_STORAGE_KEY = "schema-atlas.tables.v1";
+
+type SharedStorageMode = "loading" | "shared" | "browser";
+
+function tableNamesChanged(current: SchemaTable[], baseline: SchemaTable[]) {
+  const currentByName = new Map(current.map((table) => [table.tableName, JSON.stringify(table)]));
+  const baselineByName = new Map(baseline.map((table) => [table.tableName, JSON.stringify(table)]));
+  return [...new Set([...currentByName.keys(), ...baselineByName.keys()])]
+    .filter((name) => currentByName.get(name) !== baselineByName.get(name));
+}
+
+function changeHistoryMatches(left: ChangeHistoryStore, right: ChangeHistoryStore) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mergeSharedHistories(remote: ChangeHistoryStore, local: ChangeHistoryStore) {
+  const names = new Set([...Object.keys(remote.tables), ...Object.keys(local.tables)]);
+  const tables: ChangeHistoryStore["tables"] = {};
+  names.forEach((tableName) => {
+    const records = [...(remote.tables[tableName] ?? []), ...(local.tables[tableName] ?? [])];
+    const byId = new Map(records.map((record) => [record.id, record]));
+    const merged = [...byId.values()]
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, 1000);
+    if (merged.length) tables[tableName] = merged;
+  });
+  return { version: 2 as const, tables };
+}
+
+function mergeRemoteTablesWithNewerLocalChanges(remote: SchemaTable[], sent: SchemaTable[], latest: SchemaTable[]) {
+  const changedAfterRequest = tableNamesChanged(latest, sent);
+  if (changedAfterRequest.length === 0) return remote;
+  const latestByName = new Map(latest.map((table) => [table.tableName, table]));
+  const merged = new Map(remote.map((table) => [table.tableName, table]));
+  changedAfterRequest.forEach((name) => {
+    const table = latestByName.get(name);
+    if (table) merged.set(name, table);
+    else merged.delete(name);
+  });
+  return [...merged.values()].sort((left, right) => left.tableName.localeCompare(right.tableName));
+}
 
 type ParsedTable = Omit<SchemaTable, "domain0" | "domain1" | "className" | "classDescription" | "classAliases" | "annotationStatus">;
 type DirectionFilter = "both" | "dependencies" | "dependents";
@@ -1420,6 +1469,10 @@ export default function Home() {
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [importDomain0, setImportDomain0] = useState("定价域");
   const [storageReady, setStorageReady] = useState(false);
+  const [storageMode, setStorageMode] = useState<SharedStorageMode>("loading");
+  const [storageSaving, setStorageSaving] = useState(false);
+  const [storageError, setStorageError] = useState("");
+  const [storageConflict, setStorageConflict] = useState("");
   const [deleteTargets, setDeleteTargets] = useState<string[]>([]);
   const [fieldTarget, setFieldTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
   const [fieldDeleteTarget, setFieldDeleteTarget] = useState<{ tableName: string; fieldName: string } | null>(null);
@@ -1435,6 +1488,15 @@ export default function Home() {
     | null
   >(null);
   const [changeHistory, setChangeHistory] = useState<ChangeHistoryStore>(() => createEmptyChangeHistory());
+  const tablesRef = useRef(tables);
+  const changeHistoryRef = useRef(changeHistory);
+  const storageModeRef = useRef<SharedStorageMode>("loading");
+  const storageConflictRef = useRef("");
+  const sharedRevisionRef = useRef(0);
+  const sharedBaselineTablesRef = useRef<SchemaTable[]>(migrateTables(seedTables));
+  const sharedBaselineHistoryRef = useRef<ChangeHistoryStore>(createEmptyChangeHistory());
+  const sharedSavingRef = useRef(false);
+  const sharedSaveTimerRef = useRef(0);
   const relationships = useMemo(() => uniqueRelationships(tables), [tables]);
   const recoverableDeletedTables = useMemo(() => {
     const active = new Set(tables.map((table) => table.tableName));
@@ -1461,44 +1523,224 @@ export default function Home() {
 
   const addChanges = (records: ChangeRecordDraft[]) => setChangeHistory((current) => appendChangeRecords(current, records));
 
+  const applySharedData = useCallback((value: SharedWorkspaceData) => {
+    const nextTables = migrateTables(value.tables).sort((left, right) => left.tableName.localeCompare(right.tableName));
+    const nextHistory = migrateChangeHistory(value.changeHistory, nextTables);
+    sharedRevisionRef.current = value.revision;
+    sharedBaselineTablesRef.current = nextTables;
+    sharedBaselineHistoryRef.current = nextHistory;
+    tablesRef.current = nextTables;
+    changeHistoryRef.current = nextHistory;
+    setTables(nextTables);
+    setChangeHistory(nextHistory);
+    setScope((current) => {
+      if (current.level === "focus" && !nextTables.some((table) => table.tableName === current.tableName)) return { level: "global" };
+      if (current.level === "domain" && !nextTables.some((table) => table.domain0 === current.domain0)) return { level: "global" };
+      if (current.level === "folder" && !nextTables.some((table) => table.domain0 === current.domain0 && table.domain1 === current.domain1)) {
+        return nextTables.some((table) => table.domain0 === current.domain0)
+          ? { level: "domain", domain0: current.domain0 }
+          : { level: "global" };
+      }
+      return current;
+    });
+    setInspector((current) => current?.kind === "table" && !nextTables.some((table) => table.tableName === current.tableName) ? null : current);
+  }, []);
+
+  const flushSharedWorkspace = useCallback(async () => {
+    if (storageModeRef.current !== "shared" || storageConflictRef.current) return;
+    if (sharedSavingRef.current) return;
+    const sentTables = tablesRef.current;
+    const sentHistory = changeHistoryRef.current;
+    const changedTableNames = tableNamesChanged(sentTables, sharedBaselineTablesRef.current);
+    const historyChanged = !changeHistoryMatches(sentHistory, sharedBaselineHistoryRef.current);
+    if (changedTableNames.length === 0 && !historyChanged) return;
+
+    sharedSavingRef.current = true;
+    setStorageSaving(true);
+    try {
+      const response = await saveSharedWorkspaceData({
+        baseRevision: sharedRevisionRef.current,
+        tables: sentTables,
+        changeHistory: sentHistory,
+        changedTableNames,
+      });
+      const remoteTables = migrateTables(response.data.tables).sort((left, right) => left.tableName.localeCompare(right.tableName));
+      const remoteHistory = migrateChangeHistory(response.data.changeHistory, remoteTables);
+      const latestTables = tablesRef.current;
+      const latestHistory = changeHistoryRef.current;
+      const mergedTables = mergeRemoteTablesWithNewerLocalChanges(remoteTables, sentTables, latestTables);
+      const mergedHistory = mergeSharedHistories(remoteHistory, latestHistory);
+      sharedRevisionRef.current = response.data.revision;
+      sharedBaselineTablesRef.current = remoteTables;
+      sharedBaselineHistoryRef.current = remoteHistory;
+      tablesRef.current = mergedTables;
+      changeHistoryRef.current = mergedHistory;
+      setTables(mergedTables);
+      setChangeHistory(mergedHistory);
+      setStorageError("");
+    } catch (error) {
+      if (error instanceof SharedWorkspaceConflict) {
+        const message = error.conflicts.length
+          ? `${error.conflicts.join("、")} 已被其他用户修改，请选择服务器版本后重新操作。`
+          : error.message;
+        storageConflictRef.current = message;
+        setStorageConflict(message);
+        toast.error("共享数据出现编辑冲突", { description: message });
+      } else {
+        setStorageError(error instanceof Error ? error.message : "共享数据保存失败");
+      }
+    } finally {
+      sharedSavingRef.current = false;
+      setStorageSaving(false);
+    }
+  }, []);
+
+  const reloadSharedWorkspace = useCallback(async () => {
+    try {
+      const response = await readSharedWorkspaceData();
+      const data = response.data?.initialized
+        ? response.data
+        : (await saveSharedWorkspaceData({
+          baseRevision: 0,
+          tables: tablesRef.current,
+          changeHistory: changeHistoryRef.current,
+          changedTableNames: tablesRef.current.map((table) => table.tableName),
+        })).data;
+      applySharedData(data);
+      storageModeRef.current = "shared";
+      setStorageMode("shared");
+      storageConflictRef.current = "";
+      setStorageConflict("");
+      setStorageError("");
+      toast.success("已载入服务器上的最新共享数据");
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "共享数据读取失败");
+    }
+  }, [applySharedData]);
+
   useEffect(() => {
     let active = true;
-    let restoredTables: SchemaTable[] | null = null;
-    let restoredHistory: ChangeHistoryStore | null = null;
+    let restoredTables = migrateTables(seedTables);
+    let restoredHistory = createEmptyChangeHistory();
+    let hasBrowserData = false;
     let readFailed = false;
     try {
       const stored = window.localStorage.getItem(TABLE_STORAGE_KEY);
       const auditStored = window.localStorage.getItem(CHANGE_LOG_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_CHANGE_LOG_STORAGE_KEY);
       if (stored !== null) {
         const restored = JSON.parse(stored) as unknown;
-        if (Array.isArray(restored)) restoredTables = migrateTables(restored as SchemaTable[]);
+        if (Array.isArray(restored)) {
+          restoredTables = migrateTables(restored as SchemaTable[]);
+          hasBrowserData = true;
+        }
       }
       if (auditStored !== null) {
         const restored = JSON.parse(auditStored) as unknown;
-        restoredHistory = migrateChangeHistory(restored, restoredTables ?? migrateTables(seedTables));
+        restoredHistory = migrateChangeHistory(restored, restoredTables);
+        hasBrowserData = true;
       }
     } catch {
       readFailed = true;
     }
-    queueMicrotask(() => {
-      if (!active) return;
-      if (restoredTables) setTables(restoredTables);
-      if (restoredHistory) setChangeHistory(restoredHistory);
-      if (readFailed) toast.error("本地数据读取失败", { description: "已使用内置示例启动，可重新导入 JSON。" });
-      setStorageReady(true);
-    });
+    void (async () => {
+      try {
+        const response = await readSharedWorkspaceData();
+        if (!active) return;
+        let data = response.data;
+        let migratedBrowserData = false;
+        if (!data?.initialized) {
+          try {
+            const initialized = await saveSharedWorkspaceData({
+              baseRevision: 0,
+              tables: restoredTables,
+              changeHistory: restoredHistory,
+              changedTableNames: restoredTables.map((table) => table.tableName),
+            });
+            data = initialized.data;
+            migratedBrowserData = hasBrowserData;
+          } catch (error) {
+            if (!(error instanceof SharedWorkspaceConflict)) throw error;
+            data = (await readSharedWorkspaceData()).data;
+          }
+        }
+        if (!data) throw new Error("服务器没有返回共享工作区数据");
+        applySharedData(data);
+        storageModeRef.current = "shared";
+        setStorageMode("shared");
+        setStorageError("");
+        if (migratedBrowserData) {
+          window.localStorage.removeItem(TABLE_STORAGE_KEY);
+          window.localStorage.removeItem(CHANGE_LOG_STORAGE_KEY);
+          window.localStorage.removeItem(LEGACY_CHANGE_LOG_STORAGE_KEY);
+          toast.success("原浏览器数据已迁移到共享工作区");
+        }
+      } catch (error) {
+        if (!active) return;
+        tablesRef.current = restoredTables;
+        changeHistoryRef.current = restoredHistory;
+        setTables(restoredTables);
+        setChangeHistory(restoredHistory);
+        storageModeRef.current = "browser";
+        setStorageMode("browser");
+        setStorageError(error instanceof Error ? error.message : "无法连接共享存储");
+        toast.warning("暂时使用浏览器存储", { description: "连接 Linux 共享服务后会自动使用服务器数据。" });
+      } finally {
+        if (!active) return;
+        if (readFailed) toast.error("旧浏览器数据读取失败", { description: "已跳过损坏的本地副本。" });
+        setStorageReady(true);
+      }
+    })();
     return () => { active = false; };
-  }, []);
+  }, [applySharedData]);
 
   useEffect(() => {
     if (!storageReady) return;
-    try {
-      window.localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(tables));
-      window.localStorage.setItem(CHANGE_LOG_STORAGE_KEY, JSON.stringify(changeHistory));
-    } catch {
-      toast.error("本地保存空间不足", { description: "请减少导入量或导出后清理该站点的浏览器存储。" });
+    tablesRef.current = tables;
+    changeHistoryRef.current = changeHistory;
+    if (storageMode === "browser") {
+      try {
+        window.localStorage.setItem(TABLE_STORAGE_KEY, JSON.stringify(tables));
+        window.localStorage.setItem(CHANGE_LOG_STORAGE_KEY, JSON.stringify(changeHistory));
+      } catch {
+        toast.error("浏览器保存空间不足", { description: "请减少导入量或导出后清理该站点的数据。" });
+      }
+      return;
     }
-  }, [storageReady, tables, changeHistory]);
+    if (storageMode !== "shared" || storageConflict) return;
+    window.clearTimeout(sharedSaveTimerRef.current);
+    sharedSaveTimerRef.current = window.setTimeout(() => void flushSharedWorkspace(), 400);
+    return () => window.clearTimeout(sharedSaveTimerRef.current);
+  }, [changeHistory, flushSharedWorkspace, storageConflict, storageMode, storageReady, tables]);
+
+  useEffect(() => {
+    storageModeRef.current = storageMode;
+    storageConflictRef.current = storageConflict;
+  }, [storageConflict, storageMode]);
+
+  useEffect(() => {
+    if (!storageReady || storageMode !== "shared") return;
+    let active = true;
+    const poll = async () => {
+      if (!active || sharedSavingRef.current || storageConflictRef.current) return;
+      const locallyDirty = tableNamesChanged(tablesRef.current, sharedBaselineTablesRef.current).length > 0
+        || !changeHistoryMatches(changeHistoryRef.current, sharedBaselineHistoryRef.current);
+      if (locallyDirty) return void flushSharedWorkspace();
+      try {
+        const response = await readSharedWorkspaceData(sharedRevisionRef.current);
+        if (!active) return;
+        setStorageError("");
+        if (response.unchanged || !response.data?.initialized) return;
+        applySharedData(response.data);
+      } catch (error) {
+        if (active) setStorageError(error instanceof Error ? error.message : "共享数据刷新失败");
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 4_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [applySharedData, flushSharedWorkspace, storageMode, storageReady]);
 
   const enterScope = (next: Scope) => {
     setScope(next);
@@ -1876,7 +2118,7 @@ export default function Home() {
   const annotationResetTable = annotationResetTarget ? tables.find((table) => table.tableName === annotationResetTarget) : undefined;
 
   if (aiOpen) return <>
-    <AiPanel open onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onAnnotationStarted={markAnnotationsInProgress} onApplyDraft={applyAiDraft} />
+    <AiPanel open onOpenChange={setAiOpen} tables={tables} datasetReady={storageReady && !storageConflict} initialTableName={aiTableTarget} onReviewTable={setAiTableTarget} onAnnotationStarted={markAnnotationsInProgress} onApplyDraft={applyAiDraft} />
     <Toaster position="bottom-right" />
   </>;
 
@@ -1905,6 +2147,11 @@ export default function Home() {
         </div>
         <div className="workspace-actions">
           <div className="model-status"><i />{tables.length} 表<span />{relationships.length} 关系<span />{crossDomainCount} 跨域{fieldGapCount > 0 && <><span /><strong className="quality-alert"><CircleAlert size={12} />{fieldGapCount} 字段缺口</strong></>}</div>
+          <div className={`shared-storage-status ${storageConflict ? "conflict" : storageError ? "offline" : ""}`} title={storageError || storageConflict || "表、标注和变更记录由服务器统一保存"}>
+            {storageMode === "shared" && !storageError ? <Cloud size={14} /> : <CloudOff size={14} />}
+            <span>{storageConflict ? "同步冲突" : storageSaving ? "正在共享" : storageMode === "shared" && !storageError ? "团队共享" : storageMode === "shared" ? "共享暂时离线" : storageMode === "loading" ? "正在载入" : "浏览器临时模式"}</span>
+            {(storageConflict || storageError) && <button type="button" onClick={() => void reloadSharedWorkspace()}>{storageConflict ? "载入服务器版本" : "重试"}</button>}
+          </div>
           <div className="annotation-overview" aria-label="表标注状态汇总">
             <strong className="completed">{annotationCounts.completed} 完整</strong>
             <strong className="in_progress">{annotationCounts.in_progress} 标注中</strong>

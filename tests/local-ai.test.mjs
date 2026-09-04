@@ -12,6 +12,7 @@ import {
   normalizePromptTemplate,
   normalizeStructuredOutput,
   reconcileSessionWithTables,
+  SharedWorkspaceConflictError,
   validateReferencePaths,
 } from "../local-ai/core.mjs";
 
@@ -211,6 +212,91 @@ test("keeps a durable index containing only Schema Atlas-created sessions", asyn
     assert.equal(summaries[0].source, "schema-atlas");
     assert.equal(summaries[0].claudeSessionId, session.id);
     assert.equal((await store.readSession(session.id)).tableName, "PE_FREE_UNIT");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("shares tables, audit history, and generation settings without overwriting concurrent table edits", async () => {
+  const temp = await mkdtemp(path.join(projectRoot, ".schema-atlas-shared-test-"));
+  try {
+    const store = new AtlasStore(temp);
+    await store.init();
+    assert.equal((await store.readSharedData()).initialized, false);
+
+    const firstHistory = {
+      version: 2,
+      tables: {
+        PE_FREE_UNIT: [{ id: "change-a", timestamp: "2026-09-04T10:00:00.000Z", tableName: "PE_FREE_UNIT", action: "import_tables", label: "导入表" }],
+      },
+    };
+    const initialized = await store.updateSharedData({
+      baseRevision: 0,
+      tables: [table],
+      changeHistory: firstHistory,
+      changedTableNames: [table.tableName],
+    });
+    assert.equal(initialized.revision, 1);
+
+    const secondTable = { ...relatedTable, foreignKeys: [], referencedBy: [] };
+    const secondHistory = {
+      version: 2,
+      tables: {
+        PE_FREE_UNIT_TYPE: [{ id: "change-b", timestamp: "2026-09-04T10:01:00.000Z", tableName: "PE_FREE_UNIT_TYPE", action: "import_tables", label: "导入类型表" }],
+      },
+    };
+    const userB = await store.updateSharedData({
+      baseRevision: 1,
+      tables: [table, secondTable],
+      changeHistory: secondHistory,
+      changedTableNames: [secondTable.tableName],
+    });
+    assert.equal(userB.revision, 2);
+
+    const userATable = { ...table, description: "由用户 A 补充的业务描述" };
+    const userA = await store.updateSharedData({
+      baseRevision: 1,
+      tables: [userATable],
+      changeHistory: firstHistory,
+      changedTableNames: [table.tableName],
+    });
+    assert.equal(userA.revision, 3);
+    assert.deepEqual(userA.tables.map((item) => item.tableName), ["PE_FREE_UNIT", "PE_FREE_UNIT_TYPE"]);
+    assert.equal(userA.tables.find((item) => item.tableName === table.tableName).description, "由用户 A 补充的业务描述");
+    assert.deepEqual(Object.keys(userA.changeHistory.tables).sort(), ["PE_FREE_UNIT", "PE_FREE_UNIT_TYPE"]);
+
+    await store.updateSharedData({
+      baseRevision: 3,
+      tables: [{ ...userATable, description: "用户 B 的后续修改" }, secondTable],
+      changeHistory: userA.changeHistory,
+      changedTableNames: [table.tableName],
+    });
+    await assert.rejects(
+      store.updateSharedData({
+        baseRevision: 3,
+        tables: [{ ...userATable, description: "用户 A 的冲突修改" }, secondTable],
+        changeHistory: userA.changeHistory,
+        changedTableNames: [table.tableName],
+      }),
+      (error) => error instanceof SharedWorkspaceConflictError && error.conflicts.includes(table.tableName),
+    );
+
+    const preferences = await store.updateSharedPreferences({
+      baseRevision: 0,
+      preferences: { referenceText: "/srv/reference", promptTemplate: "模板", batchInstruction: "批量要求" },
+    });
+    assert.equal(preferences.revision, 1);
+    await store.updateSharedPreferences({
+      baseRevision: 1,
+      preferences: { referenceText: "/srv/reference", promptTemplate: "新模板", batchInstruction: "批量要求" },
+    });
+    await assert.rejects(
+      store.updateSharedPreferences({
+        baseRevision: 1,
+        preferences: { referenceText: "/other", promptTemplate: "旧模板", batchInstruction: "旧要求" },
+      }),
+      SharedWorkspaceConflictError,
+    );
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -450,6 +536,34 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     server = await startServer();
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
+    const emptySharedData = await (await fetch(`${origin}/api/ai/workspace/data`)).json();
+    assert.equal(emptySharedData.data.initialized, false);
+    const sharedDataResponse = await fetch(`${origin}/api/ai/workspace/data`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseRevision: 0,
+        tables: [table],
+        changeHistory: { version: 2, tables: {} },
+        changedTableNames: [table.tableName],
+      }),
+    });
+    assert.equal(sharedDataResponse.status, 200);
+    const sharedData = await sharedDataResponse.json();
+    assert.equal(sharedData.data.revision, 1);
+    assert.equal(sharedData.dataset.tableCount, 1);
+    const unchangedSharedData = await (await fetch(`${origin}/api/ai/workspace/data?revision=1`)).json();
+    assert.equal(unchangedSharedData.unchanged, true);
+    const sharedPreferencesResponse = await fetch(`${origin}/api/ai/workspace/preferences`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseRevision: 0,
+        preferences: { referenceText: projectRoot, promptTemplate: defaultPromptTemplate, batchInstruction: "生成全部表" },
+      }),
+    });
+    assert.equal(sharedPreferencesResponse.status, 200);
+    assert.equal((await sharedPreferencesResponse.json()).preferences.revision, 1);
     const syncResponse = await fetch(`${origin}/api/ai/datasets/sync`, {
       method: "POST",
       headers: { "content-type": "application/json" },

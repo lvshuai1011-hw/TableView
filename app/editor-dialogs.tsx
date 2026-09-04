@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CircleAlert, FilePenLine, Plus, RotateCcw, Tags, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +48,7 @@ function FieldEditorForm({
   const [descriptionParts, setDescriptionParts] = useState(() => splitBilingualDescription(draft.detailedDescription));
   const [enumAliasTexts, setEnumAliasTexts] = useState(() => draft.enumValues.map((item) => item.aliases.join("，")));
   const [enumEnabled, setEnumEnabled] = useState(() => Boolean(draft.enumRef || draft.enumDescription || draft.enumValues.length));
+  const editorScrollRef = useRef<HTMLDivElement | null>(null);
   const update = <K extends keyof ColumnAnnotation>(key: K, value: ColumnAnnotation[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const updateEnum = (index: number, patch: Partial<EnumValue>) => update("enumValues", draft.enumValues.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   const addEnum = () => {
@@ -86,21 +87,41 @@ function FieldEditorForm({
     description: item.description.trim(),
     aliases: parseList(enumAliasTexts[index] ?? ""),
   }));
-  const missingRequired = draft.included ? [
-    !draft.entityColumn.trim() ? "属性名" : "",
-    parsedAliases.length === 0 ? "字段别名" : "",
-    !descriptionParts.chinese.trim() ? "中文业务描述" : "",
-    !descriptionParts.english.trim() ? "英文业务描述" : "",
-    enumEnabled && !draft.enumRef.trim() ? "枚举名称" : "",
-    enumEnabled && !draft.enumDescription.trim() ? "枚举说明" : "",
-    enumEnabled && parsedEnumValues.length === 0 ? "枚举值" : "",
+  const missingRequirements = draft.included ? [
+    { key: "entity-column", label: "属性名", missing: !draft.entityColumn.trim() },
+    { key: "field-aliases", label: "字段别名", missing: parsedAliases.length === 0 },
+    { key: "description-zh", label: "中文业务描述", missing: !descriptionParts.chinese.trim() },
+    { key: "description-en", label: "英文业务描述", missing: !descriptionParts.english.trim() },
+    { key: "enum-ref", label: "枚举名称", missing: enumEnabled && !draft.enumRef.trim() },
+    { key: "enum-description", label: "枚举说明", missing: enumEnabled && !draft.enumDescription.trim() },
+    { key: "enum-values", label: "枚举值", missing: enumEnabled && parsedEnumValues.length === 0 },
     ...parsedEnumValues.flatMap((item, index) => enumEnabled ? [
-      !item.value ? `枚举值 ${index + 1} 的 value` : "",
-      item.aliases.length === 0 ? `枚举值 ${index + 1} 的别名` : "",
-      !item.description ? `枚举值 ${index + 1} 的说明` : "",
+      { key: `enum-${index}-value`, label: `枚举值 ${index + 1} 的 value`, missing: !item.value },
+      { key: `enum-${index}-aliases`, label: `枚举值 ${index + 1} 的别名`, missing: item.aliases.length === 0 },
+      { key: `enum-${index}-description`, label: `枚举值 ${index + 1} 的说明`, missing: !item.description },
     ] : []),
-  ].filter(Boolean) : [];
-  const canSave = missingRequired.length === 0;
+  ].filter((item) => item.missing) : [];
+  const missingRequired = missingRequirements.map((item) => item.label);
+  const canSave = missingRequirements.length === 0;
+  const focusFirstMissing = () => {
+    const key = missingRequirements[0]?.key;
+    if (!key) return;
+    const container = editorScrollRef.current?.querySelector<HTMLElement>(`[data-required-key="${key}"]`);
+    container?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => container?.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")?.focus(), 250);
+  };
+  const save = () => {
+    if (!canSave) return focusFirstMissing();
+    onSave({
+      ...draft,
+      entityColumn: draft.entityColumn.trim(),
+      aliases: parsedAliases,
+      detailedDescription: joinBilingualDescription(descriptionParts),
+      enumRef: enumEnabled ? draft.enumRef.trim() : "",
+      enumDescription: enumEnabled ? draft.enumDescription.trim() : "",
+      enumValues: enumEnabled ? parsedEnumValues : [],
+    });
+  };
 
   return <DialogContent className="field-editor-dialog sm:max-w-3xl">
     <DialogHeader>
@@ -108,11 +129,13 @@ function FieldEditorForm({
       <DialogTitle>字段标注 · {column.name}</DialogTitle>
       <DialogDescription>{table.className} · 数据库类型 {column.dataType} → 导出类型 {normalizeExportType(column.dataType)}</DialogDescription>
     </DialogHeader>
-    <div className="editor-scroll">
+    <div className="editor-scroll" ref={editorScrollRef}>
       <section className="editor-switch-row">
         <div><strong>导出该字段</strong><span>关闭后，本体与 RDB Mapping 都不会包含它</span></div>
         <Switch checked={draft.included} onCheckedChange={(checked) => update("included", checked)} />
       </section>
+
+      {missingRequired.length > 0 && <button type="button" className="required-fields-alert" onClick={focusFirstMissing} aria-live="polite"><CircleAlert size={15} /><div><strong>还不能保存</strong><span>请填写：{missingRequired.join("、")}</span></div></button>}
 
       {(column.description || column.remark) && <section className="editor-section imported-field-context">
         <h3>导入 JSON 中的字段资料</h3>
@@ -123,18 +146,18 @@ function FieldEditorForm({
       <section className="editor-section">
         <h3>属性基础信息</h3>
         <div className="editor-grid two">
-          <label><span>属性名 attr_name <b>*</b></span><Input value={draft.entityColumn} onChange={(event) => onEntityColumnChange(event.target.value)} /></label>
-          <label><span>字段别名 aliases（逗号或换行分隔）<b>*</b></span><Input value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} /></label>
+          <label data-required-key="entity-column"><span>属性名 attr_name <b>*</b></span><Input value={draft.entityColumn} onChange={(event) => onEntityColumnChange(event.target.value)} /></label>
+          <label data-required-key="field-aliases"><span>字段别名 aliases（逗号或换行分隔）<b>*</b></span><Input value={aliasesText} onChange={(event) => setAliasesText(event.target.value)} /></label>
         </div>
         <div className="editor-grid bilingual-description-editor">
-          <label><span>中文业务描述 <b>*</b></span><Textarea value={descriptionParts.chinese} onChange={(event) => setDescriptionParts((current) => ({ ...current, chinese: event.target.value }))} rows={5} /></label>
-          <label><span>English Description <b>*</b></span><Textarea value={descriptionParts.english} onChange={(event) => setDescriptionParts((current) => ({ ...current, english: event.target.value }))} rows={5} /></label>
+          <label data-required-key="description-zh"><span>中文业务描述 <b>*</b></span><Textarea value={descriptionParts.chinese} onChange={(event) => setDescriptionParts((current) => ({ ...current, chinese: event.target.value }))} rows={5} /></label>
+          <label data-required-key="description-en"><span>English Description <b>*</b></span><Textarea value={descriptionParts.english} onChange={(event) => setDescriptionParts((current) => ({ ...current, english: event.target.value }))} rows={5} /></label>
         </div>
         <div className="editor-boolean-grid">
-          <label><Switch checked={draft.isLocalId} onCheckedChange={(checked) => update("isLocalId", checked)} /><span><strong>is_local_id</strong><small>false 时不导出</small></span></label>
-          <label><Switch checked={draft.isDisplayName} onCheckedChange={(checked) => update("isDisplayName", checked)} /><span><strong>is_display_name</strong><small>作为对象显示名称</small></span></label>
-          <label><Switch checked={draft.isSemantic} onCheckedChange={(checked) => update("isSemantic", checked)} /><span><strong>is_semantic</strong><small>参与语义理解</small></span></label>
-          <label><Switch checked={draft.isCode} onCheckedChange={(checked) => update("isCode", checked)} /><span><strong>is_code</strong><small>标识编码类属性</small></span></label>
+          <label><Switch checked={draft.isLocalId} onCheckedChange={(checked) => update("isLocalId", checked)} /><span><strong>is_local_id</strong><small>内部标识/引用ID（主键、外键）</small></span></label>
+          <label><Switch checked={draft.isDisplayName} onCheckedChange={(checked) => update("isDisplayName", checked)} /><span><strong>is_display_name</strong><small>实体的对外显示名称（UI/报表中用的可读名）</small></span></label>
+          <label><Switch checked={draft.isSemantic} onCheckedChange={(checked) => update("isSemantic", checked)} /><span><strong>is_semantic</strong><small>承载业务语义，需纳入语义建模（名称/状态/标记位）</small></span></label>
+          <label><Switch checked={draft.isCode} onCheckedChange={(checked) => update("isCode", checked)} /><span><strong>is_code</strong><small>业务编码（外部/人工可读，区别于内部ID）</small></span></label>
         </div>
       </section>
 
@@ -142,27 +165,26 @@ function FieldEditorForm({
         <div className="editor-section-heading"><div><h3>枚举引用</h3><p>开启后自动以 attr_name 首字母大写生成默认名称，也可手工修改；定义单独导出到当前 0级域的 enums 文件夹。</p></div><div className="enum-switch"><Badge variant="outline">{enumEnabled ? `${draft.enumValues.length} 个值` : "未开启"}</Badge><Switch checked={enumEnabled} onCheckedChange={onEnumEnabledChange} aria-label="启用枚举引用" /></div></div>
         {enumEnabled && <div className="enum-structure">
           <div className="editor-grid two">
-            <label><span>枚举名称 enum_ref / enum_name <b>*</b></span><Input value={draft.enumRef} onChange={(event) => update("enumRef", event.target.value)} /></label>
-            <label><span>枚举说明 description <b>*</b></span><Textarea value={draft.enumDescription} onChange={(event) => update("enumDescription", event.target.value)} rows={3} /></label>
+            <label data-required-key="enum-ref"><span>枚举名称 enum_ref / enum_name <b>*</b></span><Input value={draft.enumRef} onChange={(event) => update("enumRef", event.target.value)} /></label>
+            <label data-required-key="enum-description"><span>枚举说明 description <b>*</b></span><Textarea value={draft.enumDescription} onChange={(event) => update("enumDescription", event.target.value)} rows={3} /></label>
           </div>
-          <div className="enum-values-heading"><div><strong>枚举值 values</strong><span>每一项的值、别名和中英文业务说明都必须填写</span></div><Button type="button" variant="outline" size="sm" onClick={addEnum}><Plus size={14} />添加枚举值</Button></div>
+          <div className="enum-values-heading" data-required-key="enum-values"><div><strong>枚举值 values</strong><span>每一项的值、别名和中英文业务说明都必须填写</span></div><Button type="button" variant="outline" size="sm" onClick={addEnum}><Plus size={14} />添加枚举值</Button></div>
           <div className="enum-values">
           {draft.enumValues.map((item, index) => <article key={`${index}-${item.value}`}>
             <div className="enum-value-heading"><strong>枚举项 {index + 1}</strong><button type="button" onClick={() => removeEnum(index)} aria-label={`删除枚举值 ${item.value || index + 1}`}><Trash2 size={14} />删除</button></div>
             <div className="editor-grid two">
-              <label><span>value <b>*</b></span><Input value={item.value} onChange={(event) => updateEnum(index, { value: event.target.value })} aria-label={`枚举值 ${index + 1}`} /></label>
-              <label><span>aliases（逗号或换行分隔）<b>*</b></span><Input value={enumAliasTexts[index] ?? ""} onChange={(event) => setEnumAliasTexts((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} aria-label={`枚举值 ${index + 1} 的别名`} /></label>
+              <label data-required-key={`enum-${index}-value`}><span>value <b>*</b></span><Input value={item.value} onChange={(event) => updateEnum(index, { value: event.target.value })} aria-label={`枚举值 ${index + 1}`} /></label>
+              <label data-required-key={`enum-${index}-aliases`}><span>aliases（逗号或换行分隔）<b>*</b></span><Input value={enumAliasTexts[index] ?? ""} onChange={(event) => setEnumAliasTexts((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} aria-label={`枚举值 ${index + 1} 的别名`} /></label>
             </div>
-            <label><span>description（中英文业务说明）<b>*</b></span><Textarea value={item.description} onChange={(event) => updateEnum(index, { description: event.target.value })} aria-label={`枚举值 ${index + 1} 的说明`} rows={3} /></label>
+            <label data-required-key={`enum-${index}-description`}><span>description（中英文业务说明）<b>*</b></span><Textarea value={item.description} onChange={(event) => updateEnum(index, { description: event.target.value })} aria-label={`枚举值 ${index + 1} 的说明`} rows={3} /></label>
           </article>)}
           </div>
         </div>}
       </section>
-      {missingRequired.length > 0 && <div className="required-fields-alert" role="alert"><CircleAlert size={15} /><div><strong>还不能保存</strong><span>请填写：{missingRequired.join("、")}</span></div></div>}
     </div>
     <DialogFooter className="editor-footer">
       {onDelete && <Button variant="outline" className="editor-delete" onClick={onDelete}><Trash2 size={14} />删除字段</Button>}
-      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!canSave} onClick={() => onSave({ ...draft, entityColumn: draft.entityColumn.trim(), aliases: parsedAliases, detailedDescription: joinBilingualDescription(descriptionParts), enumRef: enumEnabled ? draft.enumRef.trim() : "", enumDescription: enumEnabled ? draft.enumDescription.trim() : "", enumValues: enumEnabled ? parsedEnumValues : [] })}>保存标注</Button></div>
+      <div><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button onClick={save}>{canSave ? "保存标注" : "定位未填项"}</Button></div>
     </DialogFooter>
   </DialogContent>;
 }

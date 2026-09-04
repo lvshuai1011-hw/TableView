@@ -15,6 +15,7 @@ import {
   normalizeStructuredOutput,
   parseStructuredResult,
   resolveAllowedRoots,
+  SharedWorkspaceConflictError,
   validateReferencePaths,
 } from "./core.mjs";
 
@@ -561,6 +562,20 @@ async function handleTodoAnswer(request, response, todoId) {
   jsonResponse(response, 202, { sessionId: session.id, todo });
 }
 
+function sharedConflictResponse(response, error) {
+  return jsonResponse(response, 409, {
+    error: error.message,
+    conflicts: error.conflicts ?? [],
+    workspace: error.workspace ?? null,
+  });
+}
+
+async function syncTablesAfterSharedUpdate(tables) {
+  const runningSessionIds = [...runningSessions.keys()];
+  runningSessionIds.forEach((sessionId) => pendingDatasetReconciliations.set(sessionId, tables));
+  return store.syncDataset(tables, { skipSessionIds: runningSessionIds });
+}
+
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   if (!url.pathname.startsWith("/api/ai/")) return jsonResponse(response, 404, { error: "接口不存在" });
@@ -575,6 +590,48 @@ async function handleRequest(request, response) {
   if (url.pathname === "/api/ai/prompt-default") {
     if (request.method !== "GET") return methodNotAllowed(response);
     return jsonResponse(response, 200, { promptTemplate: defaultPromptTemplate });
+  }
+  if (url.pathname === "/api/ai/workspace/data") {
+    if (request.method === "GET") {
+      const data = await store.readSharedData();
+      const knownRevision = Number(url.searchParams.get("revision"));
+      if (data.initialized && Number.isInteger(knownRevision) && knownRevision === data.revision) {
+        return jsonResponse(response, 200, { unchanged: true, revision: data.revision });
+      }
+      return jsonResponse(response, 200, { unchanged: false, data });
+    }
+    if (request.method !== "PATCH") return methodNotAllowed(response);
+    const body = await readJsonBody(request);
+    if (!Array.isArray(body.tables) || !body.tables.every(validTable)) {
+      return jsonResponse(response, 400, { error: "缺少有效的共享表数据" });
+    }
+    try {
+      const data = await store.updateSharedData(body);
+      const dataset = await syncTablesAfterSharedUpdate(data.tables);
+      return jsonResponse(response, 200, { data, dataset });
+    } catch (error) {
+      if (error instanceof SharedWorkspaceConflictError) return sharedConflictResponse(response, error);
+      throw error;
+    }
+  }
+  if (url.pathname === "/api/ai/workspace/preferences") {
+    if (request.method === "GET") {
+      const preferences = await store.readSharedPreferences();
+      const knownRevision = Number(url.searchParams.get("revision"));
+      if (preferences.initialized && Number.isInteger(knownRevision) && knownRevision === preferences.revision) {
+        return jsonResponse(response, 200, { unchanged: true, revision: preferences.revision });
+      }
+      return jsonResponse(response, 200, { unchanged: false, preferences });
+    }
+    if (request.method !== "PATCH") return methodNotAllowed(response);
+    const body = await readJsonBody(request);
+    try {
+      const preferences = await store.updateSharedPreferences(body);
+      return jsonResponse(response, 200, { preferences });
+    } catch (error) {
+      if (error instanceof SharedWorkspaceConflictError) return sharedConflictResponse(response, error);
+      throw error;
+    }
   }
   if (url.pathname === "/api/ai/datasets/sync") {
     if (request.method !== "POST") return methodNotAllowed(response);

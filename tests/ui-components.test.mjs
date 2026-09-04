@@ -53,6 +53,36 @@ test("centers review queues without moving the left-aligned workbench tabs", asy
   assert.match(css, /\.ai-review-list, \.ai-todo-list[^\n]+margin-inline:\s*auto\s*!important/);
 });
 
+test("groups review and clarification queues by level-zero domain", async () => {
+  const source = await readFile(path.join(root, "app", "ai-panel.tsx"), "utf8");
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+
+  assert.match(source, /reviewGroups\.map/);
+  assert.match(source, /todoGroups\.map/);
+  assert.match(source, /className="ai-domain-task-group"/);
+  assert.match(css, /\.ai-domain-task-group\s*\{/);
+});
+
+test("keeps the field editor body scrollable and can focus the first missing requirement", async () => {
+  const source = await readFile(path.join(root, "app", "editor-dialogs.tsx"), "utf8");
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+
+  assert.match(source, /定位未填项/);
+  assert.match(source, /focusFirstMissing/);
+  assert.match(css, /\.field-editor-dialog[^\n]+grid-template-rows:\s*auto minmax\(0, 1fr\) auto/);
+  assert.match(css, /\.editor-scroll[^\n]+overflow-y:\s*auto/);
+});
+
+test("explains field annotation switches by business meaning", async () => {
+  const source = await readFile(path.join(root, "app", "editor-dialogs.tsx"), "utf8");
+
+  assert.match(source, /内部标识\/引用ID（主键、外键）/);
+  assert.match(source, /实体的对外显示名称（UI\/报表中用的可读名）/);
+  assert.match(source, /承载业务语义，需纳入语义建模（名称\/状态\/标记位）/);
+  assert.match(source, /业务编码（外部\/人工可读，区别于内部ID）/);
+  assert.doesNotMatch(source, /false 时不导出/);
+});
+
 test("keeps application text at a readable explicit size", async () => {
   const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
   const fontSizes = [...css.matchAll(/font-size:\s*([0-9.]+)px/g)].map((match) => Number(match[1]));

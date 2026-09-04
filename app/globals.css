@@ -267,6 +267,10 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .model-status { display: flex; align-items: center; gap: 7px; color: #64768a; font-size: 12px; }
 .model-status i { width: 7px; height: 7px; background: #4fc69a; border-radius: 50%; }
 .model-status span { width: 1px; height: 12px; margin: 0 2px; background: #d9e0e2; }
+.shared-storage-status { display: flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 9px; color: #286954; background: #edf8f3; border: 1px solid #cde8dc; border-radius: 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.shared-storage-status.offline { color: #806126; background: #fff8e8; border-color: #eedda9; }
+.shared-storage-status.conflict { color: #a44643; background: #fff1f0; border-color: #efcecc; }
+.shared-storage-status button { padding: 0; color: inherit; background: none; border: 0; border-bottom: 1px solid currentColor; font: inherit; cursor: pointer; }
 .annotation-overview { display: flex; align-items: center; gap: 3px; padding: 4px; background: #eef2f3; border: 1px solid #dfe5e7; border-radius: 8px; }
 .annotation-overview strong { padding: 4px 6px; color: #68798a; border-radius: 5px; font-size: 10.5px; font-weight: 700; white-space: nowrap; }
 .annotation-overview .completed { color: #126e64; background: #ddf1ed; }
@@ -542,10 +546,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 
 /* Annotation and governance editors */
 .field-editor-dialog, .table-config-dialog, .rename-domain-dialog { max-height: min(92vh, 940px); overflow: hidden; padding: 0; }
+.field-editor-dialog { height: min(92dvh, 940px); grid-template-rows: auto minmax(0, 1fr) auto; gap: 0; }
 .field-editor-dialog [data-slot="dialog-header"], .table-config-dialog [data-slot="dialog-header"], .rename-domain-dialog [data-slot="dialog-header"] { padding: 23px 27px 18px; border-bottom: 1px solid #e2e8e9; }
 .field-editor-dialog h2, .table-config-dialog h2, .rename-domain-dialog h2 { color: #1f344b; font-size: 20px; }
 .field-editor-dialog [data-slot="dialog-description"], .table-config-dialog [data-slot="dialog-description"], .rename-domain-dialog [data-slot="dialog-description"] { color: #7d8c9a; font-size: 12px; }
-.editor-scroll { min-height: 0; display: grid; gap: 11px; padding: 16px 27px 18px; overflow-y: auto; background: #f6f8f8; }
+.editor-scroll { min-height: 0; display: grid; gap: 11px; padding: 16px 27px 18px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; background: #f6f8f8; }
 .editor-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 14px; background: #e9f4f2; border: 1px solid #cfe5e1; border-radius: 9px; }
 .editor-switch-row > div { display: grid; gap: 3px; }
 .editor-switch-row strong { color: #2b5f5b; font-size: 12px; }
@@ -586,7 +591,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .enum-value-heading strong { color: #526a7c; font-size: 11px; }
 .enum-value-heading button { display: flex; align-items: center; gap: 4px; padding: 4px 6px; color: #a35858; background: #fff1f1; border: 1px solid #ebcdcd; border-radius: 5px; font-size: 10px; }
 .enum-values article textarea { min-height: 68px; }
-.required-fields-alert { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; color: #9c5b27; background: #fff7e9; border: 1px solid #edd7b6; border-radius: 8px; }
+.required-fields-alert { width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; color: #9c5b27; background: #fff7e9; border: 1px solid #edd7b6; border-radius: 8px; font: inherit; text-align: left; cursor: pointer; }
+.required-fields-alert:hover { background: #fff1d9; border-color: #e4c697; }
 .required-fields-alert > div { display: grid; gap: 3px; }
 .required-fields-alert strong { font-size: 11.5px; }
 .required-fields-alert span { font-size: 10.5px; line-height: 1.5; }
@@ -817,6 +823,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-batch-note p { margin: 0; font-size: 14px; line-height: 1.55; }
 
 .ai-review-list { max-width: 1040px; }
+.ai-domain-task-groups { display: grid; gap: 14px; }
+.ai-domain-task-group { overflow: hidden; background: #f6f9fa; border: 1px solid #d8e4e6; border-radius: 11px; }
+.ai-domain-task-group > summary { display: flex; align-items: center; gap: 9px; padding: 11px 14px; color: #36566c; cursor: pointer; font-size: 15px; font-weight: 750; list-style-position: inside; }
+.ai-domain-task-group > summary .badge { margin-left: auto; background: #fff; }
+.ai-domain-task-group > div { display: grid; gap: 10px; padding: 0 10px 10px; }
 .ai-review-card { display: grid; gap: 12px; padding: 15px 17px; background: #fff; border: 1px solid #dbe5e7; border-radius: 10px; }
 .ai-review-card > div { display: flex; align-items: center; gap: 10px; }
 .ai-review-card > div:first-child > div { min-width: 0; flex: 1; display: grid; gap: 3px; }

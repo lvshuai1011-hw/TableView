@@ -57,6 +57,13 @@ import type { ColumnAnnotation, SchemaTable } from "./data";
 import { splitBilingualDescription } from "./description-utils";
 import { FieldEditorDialog, TableConfigDialog } from "./editor-dialogs";
 import { validateExportConfiguration } from "./schema-utils";
+import {
+  readSharedAiPreferences,
+  saveSharedAiPreferences,
+  SharedWorkspaceConflict,
+  type SharedAiPreferences,
+  type SharedAiPreferencesValue,
+} from "./shared-workspace";
 import type {
   AiDataset,
   AiHealth,
@@ -75,6 +82,31 @@ const PREVIOUS_BATCH_INSTRUCTION_KEY = "schema-atlas.ai.batch-instruction.v1";
 const DEFAULT_BATCH_INSTRUCTION = DEFAULT_BATCH_INSTRUCTION_TEXT.trim();
 const DEFAULT_TABLE_INSTRUCTION = DEFAULT_TABLE_INSTRUCTION_TEXT.trim();
 const PROMPT_VARIABLES = ["table_name", "mode", "dataset_context", "reference_paths", "clarifications", "user_message"];
+
+function preferenceValues(value: SharedAiPreferencesValue): SharedAiPreferencesValue {
+  return {
+    referenceText: value.referenceText,
+    promptTemplate: value.promptTemplate,
+    batchInstruction: value.batchInstruction,
+  };
+}
+
+function preferencesMatch(left: SharedAiPreferencesValue, right: SharedAiPreferencesValue) {
+  return left.referenceText === right.referenceText
+    && left.promptTemplate === right.promptTemplate
+    && left.batchInstruction === right.batchInstruction;
+}
+
+function groupItemsByDomain<T>(items: T[], domainOf: (item: T) => string) {
+  const grouped = new Map<string, T[]>();
+  items.forEach((item) => {
+    const domain = domainOf(item).trim() || "未归类";
+    grouped.set(domain, [...(grouped.get(domain) ?? []), item]);
+  });
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left === right ? 0 : left === "未归类" ? 1 : right === "未归类" ? -1 : left.localeCompare(right, "zh-CN"))
+    .map(([domain, domainItems]) => ({ domain, items: domainItems }));
+}
 
 function withFieldAnalysisRequirement(value: string) {
   const prompt = value.trim();
@@ -264,6 +296,10 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const [promptTemplate, setPromptTemplate] = useState(DEFAULT_ANNOTATION_PROMPT.trim());
   const [batchInstruction, setBatchInstruction] = useState(DEFAULT_BATCH_INSTRUCTION);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const [preferencesMode, setPreferencesMode] = useState<"loading" | "shared" | "browser">("loading");
+  const [preferencesSaving, setPreferencesSaving] = useState(false);
+  const [preferencesError, setPreferencesError] = useState("");
+  const [preferencesConflict, setPreferencesConflict] = useState("");
   const [dataset, setDataset] = useState<AiDataset | null>(null);
   const [datasetSyncing, setDatasetSyncing] = useState(false);
   const [datasetError, setDatasetError] = useState("");
@@ -275,6 +311,21 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const [draftSaving, setDraftSaving] = useState(false);
   const pendingConversationSessionId = useRef<string | null>(null);
   const workComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const preferencesModeRef = useRef<"loading" | "shared" | "browser">("loading");
+  const preferencesRevisionRef = useRef(0);
+  const preferencesSavingRef = useRef(false);
+  const preferencesConflictRef = useRef("");
+  const preferencesTimerRef = useRef(0);
+  const preferencesBaselineRef = useRef<SharedAiPreferencesValue>({
+    referenceText: "",
+    promptTemplate: DEFAULT_ANNOTATION_PROMPT.trim(),
+    batchInstruction: DEFAULT_BATCH_INSTRUCTION,
+  });
+  const preferencesCurrentRef = useRef<SharedAiPreferencesValue>({
+    referenceText: "",
+    promptTemplate: DEFAULT_ANNOTATION_PROMPT.trim(),
+    batchInstruction: DEFAULT_BATCH_INSTRUCTION,
+  });
   const activeTable = initialTableName ? tables.find((table) => table.tableName === initialTableName) : undefined;
   const domains = useMemo(() => [...new Set(tables.map((table) => table.domain0))].sort((a, b) => a.localeCompare(b, "zh-CN")), [tables]);
   const referencePaths = useMemo(() => referenceText.split("\n").map((item) => item.trim()).filter(Boolean), [referenceText]);
@@ -303,7 +354,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   }, []);
 
   const syncDataset = useCallback(async () => {
-    if (!datasetReady) throw new Error("浏览器中的导入数据尚未恢复完成");
+    if (!datasetReady) throw new Error("共享工作区中的导入数据尚未恢复完成");
     setDatasetSyncing(true);
     try {
       const value = await api<{ dataset: AiDataset }>("/api/ai/datasets/sync", {
@@ -342,32 +393,182 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     }
   }, []);
 
+  const applySharedPreferences = useCallback((value: SharedAiPreferences) => {
+    const next = preferenceValues(value);
+    preferencesRevisionRef.current = value.revision;
+    preferencesBaselineRef.current = next;
+    preferencesCurrentRef.current = next;
+    setReferenceText(next.referenceText);
+    setPromptTemplate(next.promptTemplate || DEFAULT_ANNOTATION_PROMPT.trim());
+    setBatchInstruction(next.batchInstruction || DEFAULT_BATCH_INSTRUCTION);
+  }, []);
+
+  const flushSharedPreferences = useCallback(async () => {
+    if (preferencesModeRef.current !== "shared" || preferencesConflictRef.current || preferencesSavingRef.current) return;
+    const sent = preferencesCurrentRef.current;
+    if (preferencesMatch(sent, preferencesBaselineRef.current)) return;
+    preferencesSavingRef.current = true;
+    setPreferencesSaving(true);
+    try {
+      const response = await saveSharedAiPreferences({
+        baseRevision: preferencesRevisionRef.current,
+        preferences: sent,
+      });
+      const remote = preferenceValues(response.preferences);
+      const latest = preferencesCurrentRef.current;
+      preferencesRevisionRef.current = response.preferences.revision;
+      preferencesBaselineRef.current = remote;
+      if (preferencesMatch(latest, sent)) {
+        preferencesCurrentRef.current = remote;
+        setReferenceText(remote.referenceText);
+        setPromptTemplate(remote.promptTemplate || DEFAULT_ANNOTATION_PROMPT.trim());
+        setBatchInstruction(remote.batchInstruction || DEFAULT_BATCH_INSTRUCTION);
+      }
+      setPreferencesError("");
+    } catch (error) {
+      if (error instanceof SharedWorkspaceConflict) {
+        preferencesConflictRef.current = error.message;
+        setPreferencesConflict(error.message);
+        toast.error("共享生成配置出现冲突", { description: "另一位用户已经修改配置，请载入服务器版本后再编辑。" });
+      } else {
+        setPreferencesError(error instanceof Error ? error.message : "共享生成配置保存失败");
+      }
+    } finally {
+      preferencesSavingRef.current = false;
+      setPreferencesSaving(false);
+    }
+  }, []);
+
+  const reloadSharedPreferences = useCallback(async () => {
+    try {
+      const response = await readSharedAiPreferences();
+      const preferences = response.preferences?.initialized
+        ? response.preferences
+        : (await saveSharedAiPreferences({
+          baseRevision: 0,
+          preferences: preferencesCurrentRef.current,
+        })).preferences;
+      applySharedPreferences(preferences);
+      preferencesModeRef.current = "shared";
+      setPreferencesMode("shared");
+      preferencesConflictRef.current = "";
+      setPreferencesConflict("");
+      setPreferencesError("");
+      toast.success("已载入服务器上的生成配置");
+    } catch (error) {
+      setPreferencesError(error instanceof Error ? error.message : "共享生成配置读取失败");
+    }
+  }, [applySharedPreferences]);
+
   useEffect(() => {
     let active = true;
-    queueMicrotask(() => {
-      if (!active) return;
+    let hasBrowserPreferences = false;
+    let browserPreferences: SharedAiPreferencesValue = {
+      referenceText: "",
+      promptTemplate: DEFAULT_ANNOTATION_PROMPT.trim(),
+      batchInstruction: DEFAULT_BATCH_INSTRUCTION,
+    };
+    try {
+      const storedReferences = window.localStorage.getItem(REFERENCES_KEY);
+      const storedPrompt = window.localStorage.getItem(PROMPT_KEY);
+      const previousPrompt = window.localStorage.getItem(PREVIOUS_PROMPT_KEY);
+      const storedBatchInstruction = window.localStorage.getItem(BATCH_INSTRUCTION_KEY);
+      const previousBatchInstruction = window.localStorage.getItem(PREVIOUS_BATCH_INSTRUCTION_KEY);
+      hasBrowserPreferences = [storedReferences, storedPrompt, previousPrompt, storedBatchInstruction, previousBatchInstruction]
+        .some((value) => value !== null);
+      browserPreferences = {
+        referenceText: storedReferences ?? "",
+        promptTemplate: storedPrompt || (previousPrompt ? withFieldAnalysisRequirement(previousPrompt) : DEFAULT_ANNOTATION_PROMPT.trim()),
+        batchInstruction: storedBatchInstruction || (previousBatchInstruction ? withBatchFieldAnalysisRequirement(previousBatchInstruction) : DEFAULT_BATCH_INSTRUCTION),
+      };
+    } catch { /* legacy browser settings are optional */ }
+    void (async () => {
       try {
-        setReferenceText(window.localStorage.getItem(REFERENCES_KEY) ?? "");
-        const storedPrompt = window.localStorage.getItem(PROMPT_KEY);
-        const previousPrompt = window.localStorage.getItem(PREVIOUS_PROMPT_KEY);
-        setPromptTemplate(storedPrompt || (previousPrompt ? withFieldAnalysisRequirement(previousPrompt) : DEFAULT_ANNOTATION_PROMPT.trim()));
-        const storedBatchInstruction = window.localStorage.getItem(BATCH_INSTRUCTION_KEY);
-        const previousBatchInstruction = window.localStorage.getItem(PREVIOUS_BATCH_INSTRUCTION_KEY);
-        setBatchInstruction(storedBatchInstruction || (previousBatchInstruction ? withBatchFieldAnalysisRequirement(previousBatchInstruction) : DEFAULT_BATCH_INSTRUCTION));
-      } catch { /* preferences are optional */ }
-      setPreferencesReady(true);
-    });
+        let response = await readSharedAiPreferences();
+        if (!active) return;
+        let preferences = response.preferences;
+        let migrated = false;
+        if (!preferences?.initialized) {
+          try {
+            preferences = (await saveSharedAiPreferences({ baseRevision: 0, preferences: browserPreferences })).preferences;
+            migrated = hasBrowserPreferences;
+          } catch (error) {
+            if (!(error instanceof SharedWorkspaceConflict)) throw error;
+            response = await readSharedAiPreferences();
+            preferences = response.preferences;
+          }
+        }
+        if (!preferences?.initialized) throw new Error("服务器没有返回共享生成配置");
+        applySharedPreferences(preferences);
+        preferencesModeRef.current = "shared";
+        setPreferencesMode("shared");
+        setPreferencesError("");
+        if (migrated) {
+          [REFERENCES_KEY, PROMPT_KEY, PREVIOUS_PROMPT_KEY, BATCH_INSTRUCTION_KEY, PREVIOUS_BATCH_INSTRUCTION_KEY]
+            .forEach((key) => window.localStorage.removeItem(key));
+        }
+      } catch (error) {
+        if (!active) return;
+        preferencesCurrentRef.current = browserPreferences;
+        preferencesBaselineRef.current = browserPreferences;
+        setReferenceText(browserPreferences.referenceText);
+        setPromptTemplate(browserPreferences.promptTemplate);
+        setBatchInstruction(browserPreferences.batchInstruction);
+        preferencesModeRef.current = "browser";
+        setPreferencesMode("browser");
+        setPreferencesError(error instanceof Error ? error.message : "无法连接共享生成配置");
+      } finally {
+        if (active) setPreferencesReady(true);
+      }
+    })();
     return () => { active = false; };
-  }, []);
+  }, [applySharedPreferences]);
 
   useEffect(() => {
     if (!preferencesReady) return;
-    try {
-      window.localStorage.setItem(REFERENCES_KEY, referenceText);
-      window.localStorage.setItem(PROMPT_KEY, promptTemplate);
-      window.localStorage.setItem(BATCH_INSTRUCTION_KEY, batchInstruction);
-    } catch { /* preferences are optional */ }
-  }, [batchInstruction, preferencesReady, promptTemplate, referenceText]);
+    const current = { referenceText, promptTemplate, batchInstruction };
+    preferencesCurrentRef.current = current;
+    if (preferencesMode === "browser") {
+      try {
+        window.localStorage.setItem(REFERENCES_KEY, referenceText);
+        window.localStorage.setItem(PROMPT_KEY, promptTemplate);
+        window.localStorage.setItem(BATCH_INSTRUCTION_KEY, batchInstruction);
+      } catch { /* browser fallback is best effort */ }
+      return;
+    }
+    if (preferencesMode !== "shared" || preferencesConflict) return;
+    window.clearTimeout(preferencesTimerRef.current);
+    preferencesTimerRef.current = window.setTimeout(() => void flushSharedPreferences(), 700);
+    return () => window.clearTimeout(preferencesTimerRef.current);
+  }, [batchInstruction, flushSharedPreferences, preferencesConflict, preferencesMode, preferencesReady, promptTemplate, referenceText]);
+
+  useEffect(() => {
+    preferencesModeRef.current = preferencesMode;
+    preferencesConflictRef.current = preferencesConflict;
+  }, [preferencesConflict, preferencesMode]);
+
+  useEffect(() => {
+    if (!preferencesReady || preferencesMode !== "shared") return;
+    let active = true;
+    const poll = async () => {
+      if (!active || preferencesSavingRef.current || preferencesConflictRef.current) return;
+      if (!preferencesMatch(preferencesCurrentRef.current, preferencesBaselineRef.current)) return void flushSharedPreferences();
+      try {
+        const response = await readSharedAiPreferences(preferencesRevisionRef.current);
+        if (!active) return;
+        setPreferencesError("");
+        if (response.unchanged || !response.preferences?.initialized) return;
+        applySharedPreferences(response.preferences);
+      } catch (error) {
+        if (active) setPreferencesError(error instanceof Error ? error.message : "共享生成配置刷新失败");
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [applySharedPreferences, flushSharedPreferences, preferencesMode, preferencesReady]);
 
   useEffect(() => {
     if (!datasetReady) return;
@@ -673,7 +874,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     .map((match) => match[1])
     .filter((key, index, items) => !PROMPT_VARIABLES.includes(key) && items.indexOf(key) === index);
   const hasDatasetContextVariable = /\{\{\s*dataset_context\s*\}\}/.test(promptTemplate);
-  const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
+  const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0 && !preferencesConflict;
   const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
   const todoMatchesCurrentStructure = (todo: AiTodo) => {
     const table = tableIndex.get(todo.tableName);
@@ -684,6 +885,8 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
   const classTodos = currentTodos.filter((todo) => todo.scope !== "field");
   const openTodos = todos.filter((todo) => todo.status === "open" && todoMatchesCurrentStructure(todo));
   const reviewSessions = sessions.filter((session) => session.status === "draft_ready" && tableIndex.has(session.tableName));
+  const reviewGroups = groupItemsByDomain(reviewSessions, (session) => session.domain0 || tableIndex.get(session.tableName)?.domain0 || "未归类");
+  const todoGroups = groupItemsByDomain(openTodos, (todo) => tableIndex.get(todo.tableName)?.domain0 || "未归类");
   const selectedSessionCount = [...selectedSessionIds].filter((id) => sessions.some((session) => session.id === id)).length;
   const allSessionsSelected = sessions.length > 0 && selectedSessionCount === sessions.length;
 
@@ -771,8 +974,9 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
               </div>
               <aside className="ai-generation-config">
                 <section className="ai-generation-settings">
-                  <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">自动保存</Badge></div>
+                  <div className="ai-section-heading"><div><FileText size={18} /><span>完整提示词模板</span></div><Badge variant="outline">{preferencesSaving ? "正在共享…" : preferencesMode === "shared" ? "服务器共享" : preferencesMode === "browser" ? "浏览器临时保存" : "正在载入"}</Badge></div>
                   <p>单表首次生成、批量生成和后续修订共用此模板。默认模板优先检索原始 JSON 与 RB、WEB、DB，Teleco_Context 仅限量用于校准格式。</p>
+                  {(preferencesConflict || preferencesError) && <div className="ai-prompt-warning"><CircleAlert size={14} /><span>{preferencesConflict || `共享配置暂时不可用：${preferencesError}`}</span><Button variant="outline" size="sm" onClick={() => void reloadSharedPreferences()}>{preferencesConflict ? "载入服务器版本" : "重试"}</Button></div>}
                   <div className="ai-prompt-variables">{PROMPT_VARIABLES.map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
                   <Textarea value={promptTemplate} onChange={(event) => setPromptTemplate(event.target.value)} spellCheck={false} aria-label="Claude Code 提示词模板" />
                   {unknownPromptVariables.length > 0 && <div className="ai-prompt-error"><CircleAlert size={14} />不支持的占位符：{unknownPromptVariables.join("、")}</div>}
@@ -793,10 +997,13 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
 
         <TabsContent value="review" className="ai-tab-content ai-review-list">
           <div className="ai-list-heading"><div><strong>待人工审核草稿</strong><span>只有生成完成且不再阻塞澄清的 Session 会进入这里</span></div><Badge variant="outline">{reviewSessions.length} 待审核</Badge></div>
-          {reviewSessions.map((session) => <article className="ai-review-card" key={session.id}>
-            <div><span className={`ai-session-dot ${statusClass(session.status)}`} /><div><code>{session.tableName}</code><small>{session.domain0} · 更新于 {shortTime(session.updatedAt)}</small></div><Badge variant="outline">{session.todoCount ? `${session.todoCount} 个非阻塞澄清` : "可审核"}</Badge></div>
-            <div><span>{session.messageCount} 条对话</span><span>{session.relatedTableCount ?? 0} 张直接关联表</span><Button size="sm" onClick={() => openSessionConversation(session.id, session.tableName)}>打开并继续</Button></div>
-          </article>)}
+          <div className="ai-domain-task-groups">{reviewGroups.map((group) => <details className="ai-domain-task-group" key={group.domain} open>
+            <summary><span>{group.domain}</span><Badge variant="outline">{group.items.length} 个草稿</Badge></summary>
+            <div>{group.items.map((session) => <article className="ai-review-card" key={session.id}>
+              <div><span className={`ai-session-dot ${statusClass(session.status)}`} /><div><code>{session.tableName}</code><small>{tableIndex.get(session.tableName)?.domain1 || "直属 0级域"} · 更新于 {shortTime(session.updatedAt)}</small></div><Badge variant="outline">{session.todoCount ? `${session.todoCount} 个非阻塞澄清` : "可审核"}</Badge></div>
+              <div><span>{session.messageCount} 条对话</span><span>{session.relatedTableCount ?? 0} 张直接关联表</span><Button size="sm" onClick={() => openSessionConversation(session.id, session.tableName)}>打开并继续</Button></div>
+            </article>)}</div>
+          </details>)}</div>
           {reviewSessions.length === 0 && <EmptyState icon={CheckCircle2} title="没有待审核草稿" detail="生成完成且无需继续澄清的表会出现在这里。" />}
         </TabsContent>
 
@@ -812,7 +1019,10 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">
           <div className="ai-list-heading"><div><strong>人工澄清队列</strong><span>答案会回到原表 Session，并触发草稿修订</span></div><Badge variant="outline">{openTodos.length} 待处理</Badge></div>
-          {openTodos.map((todo) => <div key={todo.id} className="ai-todo-with-table"><div><button type="button" onClick={() => { setSelectedSessionId(todo.sessionId); setTab("sessions"); }}><code>{todo.tableName}</code><span>查看会话</span></button><button type="button" onClick={() => openSessionConversation(todo.sessionId, todo.tableName)}>进入并继续</button></div><TodoCard todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} /></div>)}
+          <div className="ai-domain-task-groups">{todoGroups.map((group) => <details className="ai-domain-task-group" key={group.domain} open>
+            <summary><span>{group.domain}</span><Badge variant="outline">{group.items.length} 项</Badge></summary>
+            <div>{group.items.map((todo) => <div key={todo.id} className="ai-todo-with-table"><div><button type="button" onClick={() => { setSelectedSessionId(todo.sessionId); setTab("sessions"); }}><code>{todo.tableName}</code><span>{tableIndex.get(todo.tableName)?.domain1 ? `${tableIndex.get(todo.tableName)?.domain1} · 查看会话` : "查看会话"}</span></button><button type="button" onClick={() => openSessionConversation(todo.sessionId, todo.tableName)}>进入并继续</button></div><TodoCard todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} /></div>)}</div>
+          </details>)}</div>
           {openTodos.length === 0 && <EmptyState icon={CheckCircle2} title="没有待澄清项" detail="检索资料后仍无明确依据或存在冲突的业务概念，才会进入这里。" />}
         </TabsContent>
 

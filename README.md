@@ -20,9 +20,9 @@ Schema Atlas 用于批量导入 PDM JSON 表定义，并从全局业务域逐层
 - 按约定目录导出 Ontology、RDB Mapping 和枚举 JSON 的 ZIP
 - 本地 Claude Code CLI 批量生成全表标注草稿，不使用 SDK 或 RAG
 - 导入表自动同步为后台数据集快照，按外键向 Claude Code 提供关联表完整字段
-- 全屏 Claude Code 标注台，含待审核、待澄清、完整执行轨迹和可批量清理的 Session 中心
+- 全屏 Claude Code 标注台，待审核与待澄清按 0级域分组，并提供完整执行轨迹和可批量清理的 Session 中心
 - 前端可见、可编辑、可恢复默认的 Claude Code 完整提示词模板
-- 导入表与人工标注保存在浏览器；AI Session、草稿和完整对话保存在服务器
+- 导入表、人工标注、域、变更记录和 AI 生成配置统一保存在 Linux 服务器，所有访问者共享可见
 
 ## 快速部署
 
@@ -51,6 +51,12 @@ npm run start:local
 
 完整安装和参考资料目录配置见 [INSTALL.md](./INSTALL.md)。
 
+### 多人访问与共享数据
+
+同一 Linux 地址允许多人同时访问。当前安装脚本配置一组共享的网页账号，不提供独立用户角色；登录后看到的是同一个团队工作区：表、字段、域、正式标注、表级变更记录、提示词模板、参考资料路径、批量生成要求、AI Session、待审核和待澄清都由服务器统一保存。
+
+浏览器每 4 秒检查一次表数据版本，生成配置每 5 秒检查一次。不同表上的并行修改会自动合并；两个人基于旧版本修改同一张表或同一份生成配置时，界面会显示同步冲突并要求显式载入服务器版本，不会静默覆盖对方结果。首次升级时，如果服务器尚无共享工作区，第一个打开新版页面的浏览器会把现有本地表、标注、变更记录和 AI 配置迁移到服务器。
+
 ## 连接本机 Claude Code
 
 Schema Atlas 不需要 Claude SDK 或 API Key，网页通过本地桥接进程调用 `claude` 命令。首次部署前，以运行服务的 Linux 用户完成一次登录：
@@ -78,7 +84,7 @@ Session 由 Schema Atlas 生成 UUID 并登记，前端不会混入用户在其�
 
 ### 提示词配置
 
-默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。“AI 标注 → 批量生成”的“生成配置”会把完整模板、本地资料路径和连接状态放在同一工作面；模板可直接编辑、自动保存在当前浏览器，也可一键恢复默认。默认检索顺序是原始 JSON 与关系、RB/WEB/DB 中的精确表名和字段名、必要的同域资料；Teleco_Context 每个任务只读取一个 entity-class 样例，必要时再读取一个 enum 样例，且只用于输出格式与标注粒度。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。逐字段 AI 标注分析只保存在 Session 审核草稿中，不会增加或污染最终导出的 Ontology 与 RDB Mapping JSON 字段。
+默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。“AI 标注 → 批量生成”的“生成配置”会把完整模板、本地资料路径和连接状态放在同一工作面；模板可直接编辑、自动保存到团队共享工作区，也可一键恢复默认。默认检索顺序是原始 JSON 与关系、RB/WEB/DB 中的精确表名和字段名、必要的同域资料；Teleco_Context 每个任务只读取一个 entity-class 样例，必要时再读取一个 enum 样例，且只用于输出格式与标注粒度。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。逐字段 AI 标注分析只保存在 Session 审核草稿中，不会增加或污染最终导出的 Ontology 与 RDB Mapping JSON 字段。
 
 Claude 结构化输出只校验 JSON 结构和字段类型，不设置描述字数、别名数量、数组长度或中英文格式正则。内容完整性由默认提示词引导，并在人工审核及最终导出校验中提示，不会因为任意字数门槛导致整轮生成失败。
 
@@ -140,12 +146,14 @@ Claude 结构化输出只校验 JSON 结构和字段类型，不设置描述字�
 
 - 类名、详细中英文业务语义描述、多个中英文类别名
 - 字段是否导出、`attr_name`、多个中英文别名和详细中英文业务语义描述
-- `is_local_id`、`is_display_name`、`is_semantic`、`is_code`；值为 `false` 时不写入导出 JSON
+- 四个人工判断的布尔开关：`is_local_id` 表示内部标识/引用 ID（主键、外键）；`is_display_name` 表示实体的对外显示名称（UI/报表中使用的可读名）；`is_semantic` 表示承载业务语义、需纳入语义建模的名称/状态/标记位；`is_code` 表示外部或人工可读、区别于内部 ID 的业务编码
 - 枚举引用开关、可编辑的 `enum_ref`、枚举说明，以及结构化的取值、双语说明和别名
 
-类名、类的中英文业务说明、类别名均为必填。字段开启“导出该字段”后，`attr_name`、中英文业务说明和至少一个别名均为必填；布尔标志是开关，值为 `false` 时不写入 JSON。开启枚举后，系统默认把 `attr_name` 首字母大写作为 `enum_ref`（如 `accountClass` → `AccountClass`），仍可手工修改；枚举说明及每项的 `value`、`aliases`、中英文 `description` 都必须填写。
+类名、类的中英文业务说明、类别名均为必填。字段开启“导出该字段”后，`attr_name`、中英文业务说明和至少一个别名均为必填；上述开关为 `false` 时只是不输出对应的布尔键，不影响该字段是否导出，字段是否导出仅由“导出该字段”控制。开启枚举后，系统默认把 `attr_name` 首字母大写作为 `enum_ref`（如 `accountClass` → `AccountClass`），仍可手工修改；枚举说明及每项的 `value`、`aliases`、中英文 `description` 都必须填写。
 
 字段编辑器中的原始 `description` 与 `remark` 来自导入 JSON，只在实际有值时显示，并作为同一字段的参考资料；不会再建立单独的“备注”页签。所有空的可选信息均不显示占位栏。
+
+字段编辑弹窗采用固定标题和操作区，中间表单独立滚动；必填项未完成时，顶部提示和底部“定位未填项”会滚动并聚焦到第一个缺失字段。
 
 数据库类型的导出映射：
 
@@ -301,4 +309,6 @@ npm ci --cache ./npm-cache --offline
 
 ## 数据存储
 
-浏览器的 `localStorage` 保存可编辑的导入结果、字段标注和表级变更记录；本地服务将每次稳定状态按内容哈希写入 `.schema-atlas-ai/datasets/<dataset-id>/tables/`，同时生成 `manifest.json` 和 `relation-index.json`。AI Session、草稿、执行记录及 TODO 也保存在 `.schema-atlas-ai/`。清除浏览器站点数据会失去当前编辑入口，因此迁移前仍应导出标注 ZIP；已落盘快照主要用于 Claude Code跨表分析和 Session 追溯。
+团队工作区保存在 `.schema-atlas-ai/shared-workspace.json`，内容包括导入表、域、类与字段标注、枚举配置、表级变更记录、提示词模板、参考资料路径和批量生成要求。稳定表状态还会按内容哈希写入 `.schema-atlas-ai/datasets/<dataset-id>/tables/`，并生成 `manifest.json` 和 `relation-index.json`，供 Claude Code 跨表分析和 Session 追溯。AI Session、草稿、完整执行记录、任务及 TODO 同样保存在 `.schema-atlas-ai/`。
+
+`localStorage` 不再是业务数据源，只在两种情况下使用：从旧版本首次迁移尚未上云的浏览器数据，或者 Linux 共享服务不可达时提供明确标记的临时浏览器模式。共享连接恢复后以服务器版本为准；关系图顶部会显示“团队共享”“正在共享”“同步冲突”或“浏览器临时模式”。

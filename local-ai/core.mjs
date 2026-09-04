@@ -771,6 +771,133 @@ function datasetArtifacts(tables, id, createdAt) {
   return { manifest, relationIndex: { schemaVersion: 1, datasetId: id, relations, byTable } };
 }
 
+function validSharedTable(value) {
+  return value && typeof value === "object" && stringValue(value.tableName) && Array.isArray(value.columns);
+}
+
+function normalizeSharedTables(value) {
+  if (!Array.isArray(value) || !value.every(validSharedTable)) throw new Error("共享工作区包含无效表结构");
+  const names = new Set();
+  return [...value].map((table) => {
+    const name = stringValue(table.tableName);
+    if (names.has(name)) throw new Error(`共享工作区存在重复表名：${name}`);
+    names.add(name);
+    return table;
+  }).sort((left, right) => String(left.tableName).localeCompare(String(right.tableName)));
+}
+
+function normalizeChangeHistory(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const rawTables = source.tables && typeof source.tables === "object" && !Array.isArray(source.tables)
+    ? source.tables
+    : {};
+  const tables = {};
+  Object.entries(rawTables).forEach(([tableName, records]) => {
+    if (!Array.isArray(records)) return;
+    const seen = new Set();
+    tables[tableName] = records.filter((record) => {
+      if (!record || typeof record !== "object" || !stringValue(record.id) || seen.has(record.id)) return false;
+      seen.add(record.id);
+      return true;
+    }).slice(0, 1000);
+  });
+  return { version: 2, tables };
+}
+
+function mergeChangeHistory(currentValue, incomingValue) {
+  const current = normalizeChangeHistory(currentValue);
+  const incoming = normalizeChangeHistory(incomingValue);
+  const names = new Set([...Object.keys(current.tables), ...Object.keys(incoming.tables)]);
+  const tables = {};
+  names.forEach((tableName) => {
+    const records = [...(current.tables[tableName] ?? []), ...(incoming.tables[tableName] ?? [])];
+    const byId = new Map();
+    records.forEach((record) => {
+      if (!byId.has(record.id)) byId.set(record.id, record);
+    });
+    const merged = [...byId.values()]
+      .sort((left, right) => String(right.timestamp ?? "").localeCompare(String(left.timestamp ?? "")))
+      .slice(0, 1000);
+    if (merged.length) tables[tableName] = merged;
+  });
+  return { version: 2, tables };
+}
+
+function normalizeSharedPreferences(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    referenceText: typeof source.referenceText === "string" ? source.referenceText : "",
+    promptTemplate: typeof source.promptTemplate === "string" ? source.promptTemplate : "",
+    batchInstruction: typeof source.batchInstruction === "string" ? source.batchInstruction : "",
+  };
+}
+
+function emptySharedWorkspace() {
+  return {
+    schemaVersion: 1,
+    data: {
+      initialized: false,
+      revision: 0,
+      updatedAt: null,
+      tables: [],
+      changeHistory: { version: 2, tables: {} },
+      tableRevisions: {},
+    },
+    preferences: {
+      initialized: false,
+      revision: 0,
+      updatedAt: null,
+      ...normalizeSharedPreferences({}),
+    },
+  };
+}
+
+function normalizeSharedWorkspace(value) {
+  const fallback = emptySharedWorkspace();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const data = value.data && typeof value.data === "object" && !Array.isArray(value.data) ? value.data : {};
+  const preferences = value.preferences && typeof value.preferences === "object" && !Array.isArray(value.preferences)
+    ? value.preferences
+    : {};
+  const initializedData = data.initialized === true;
+  const initializedPreferences = preferences.initialized === true;
+  return {
+    schemaVersion: 1,
+    data: {
+      initialized: initializedData,
+      revision: initializedData && Number.isInteger(data.revision) && data.revision > 0 ? data.revision : 0,
+      updatedAt: initializedData && typeof data.updatedAt === "string" ? data.updatedAt : null,
+      tables: initializedData ? normalizeSharedTables(data.tables) : [],
+      changeHistory: initializedData ? normalizeChangeHistory(data.changeHistory) : fallback.data.changeHistory,
+      tableRevisions: initializedData && data.tableRevisions && typeof data.tableRevisions === "object" && !Array.isArray(data.tableRevisions)
+        ? Object.fromEntries(Object.entries(data.tableRevisions).flatMap(([name, revision]) => Number.isInteger(revision) && revision > 0 ? [[name, revision]] : []))
+        : {},
+    },
+    preferences: {
+      initialized: initializedPreferences,
+      revision: initializedPreferences && Number.isInteger(preferences.revision) && preferences.revision > 0 ? preferences.revision : 0,
+      updatedAt: initializedPreferences && typeof preferences.updatedAt === "string" ? preferences.updatedAt : null,
+      ...normalizeSharedPreferences(preferences),
+    },
+  };
+}
+
+function publicSharedData(data) {
+  const visible = { ...data };
+  delete visible.tableRevisions;
+  return visible;
+}
+
+export class SharedWorkspaceConflictError extends Error {
+  constructor(message, workspace, conflicts = []) {
+    super(message);
+    this.name = "SharedWorkspaceConflictError";
+    this.statusCode = 409;
+    this.workspace = workspace;
+    this.conflicts = conflicts;
+  }
+}
+
 export class AtlasStore {
   constructor(rootDir) {
     this.rootDir = rootDir;
@@ -780,6 +907,7 @@ export class AtlasStore {
     this.sessionIndexPath = path.join(this.sessionsDir, "index.json");
     this.jobIndexPath = path.join(this.jobsDir, "index.json");
     this.currentDatasetPath = path.join(this.datasetsDir, "current.json");
+    this.sharedWorkspacePath = path.join(rootDir, "shared-workspace.json");
     this.writeQueue = Promise.resolve();
   }
 
@@ -818,6 +946,85 @@ export class AtlasStore {
   workspacePath(id) { return path.join(this.sessionsDir, `${safeId(id)}.workspace`); }
   jobPath(id) { return path.join(this.jobsDir, `${safeId(id)}.json`); }
   datasetPath(id) { return path.join(this.datasetsDir, safeDatasetId(id)); }
+
+  async readSharedWorkspace() {
+    return normalizeSharedWorkspace(await this.readJson(this.sharedWorkspacePath, null));
+  }
+
+  async readSharedData() {
+    return publicSharedData((await this.readSharedWorkspace()).data);
+  }
+
+  async readSharedPreferences() {
+    return (await this.readSharedWorkspace()).preferences;
+  }
+
+  async updateSharedData({ baseRevision = 0, tables: rawTables, changeHistory, changedTableNames = [] }) {
+    const incomingTables = normalizeSharedTables(rawTables);
+    const requestedNames = [...new Set((Array.isArray(changedTableNames) ? changedTableNames : [])
+      .map((name) => stringValue(name)).filter(Boolean))];
+    return this.serialize(async () => {
+      const workspace = await this.readSharedWorkspace();
+      const current = workspace.data;
+      const initialized = current.initialized;
+      const nextRevision = initialized ? current.revision + 1 : 1;
+      const names = initialized ? requestedNames : incomingTables.map((table) => table.tableName);
+      if (initialized && (!Number.isInteger(baseRevision) || baseRevision < 1 || baseRevision > current.revision)) {
+        throw new SharedWorkspaceConflictError("共享工作区版本无效，请重新载入", publicSharedData(current));
+      }
+      const conflicts = initialized
+        ? names.filter((name) => Number(current.tableRevisions[name] ?? 0) > baseRevision)
+        : [];
+      if (conflicts.length) {
+        throw new SharedWorkspaceConflictError(
+          `以下表已被其他用户修改：${conflicts.join("、")}`,
+          publicSharedData(current),
+          conflicts,
+        );
+      }
+      const incomingByName = new Map(incomingTables.map((table) => [table.tableName, table]));
+      const mergedByName = new Map((initialized ? current.tables : []).map((table) => [table.tableName, table]));
+      names.forEach((name) => {
+        if (incomingByName.has(name)) mergedByName.set(name, incomingByName.get(name));
+        else mergedByName.delete(name);
+      });
+      const now = new Date().toISOString();
+      const nextData = {
+        initialized: true,
+        revision: nextRevision,
+        updatedAt: now,
+        tables: [...mergedByName.values()].sort((left, right) => String(left.tableName).localeCompare(String(right.tableName))),
+        changeHistory: initialized
+          ? mergeChangeHistory(current.changeHistory, changeHistory)
+          : normalizeChangeHistory(changeHistory),
+        tableRevisions: { ...(initialized ? current.tableRevisions : {}) },
+      };
+      names.forEach((name) => { nextData.tableRevisions[name] = nextRevision; });
+      workspace.data = nextData;
+      await this.atomicWrite(this.sharedWorkspacePath, workspace);
+      return publicSharedData(nextData);
+    });
+  }
+
+  async updateSharedPreferences({ baseRevision = 0, preferences: rawPreferences }) {
+    const nextPreferences = normalizeSharedPreferences(rawPreferences);
+    return this.serialize(async () => {
+      const workspace = await this.readSharedWorkspace();
+      const current = workspace.preferences;
+      if (current.initialized && baseRevision !== current.revision) {
+        throw new SharedWorkspaceConflictError("共享生成配置已被其他用户修改，请重新载入", current);
+      }
+      const next = {
+        initialized: true,
+        revision: current.initialized ? current.revision + 1 : 1,
+        updatedAt: new Date().toISOString(),
+        ...nextPreferences,
+      };
+      workspace.preferences = next;
+      await this.atomicWrite(this.sharedWorkspacePath, workspace);
+      return next;
+    });
+  }
 
   async syncDataset(rawTables, { skipSessionIds = [] } = {}) {
     if (!Array.isArray(rawTables)) throw new Error("数据集必须是表数组");
