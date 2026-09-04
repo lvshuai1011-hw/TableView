@@ -9,6 +9,7 @@ import {
   annotationOutputSchema,
   AtlasStore,
   buildAnnotationPrompt,
+  clearSessionStructureState,
   describeStreamEvent,
   normalizePromptTemplate,
   normalizeStructuredOutput,
@@ -25,6 +26,7 @@ const host = process.env.SCHEMA_ATLAS_AI_HOST || "127.0.0.1";
 const port = Number(process.env.SCHEMA_ATLAS_AI_PORT || 4317);
 const store = new AtlasStore(storeRoot);
 const runningSessions = new Map();
+const pendingDatasetReconciliations = new Map();
 const runningJobs = new Set();
 const cancelledJobs = new Set();
 let allowedRoots = [];
@@ -203,6 +205,7 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
     session.todos = [...answeredTodos, ...result.todos];
     session.messages.push(message("assistant", result.reply, { draftUpdated: true, todoCount: result.todos.length }));
     session.turnCount += 1;
+    clearSessionStructureState(session);
     session.status = result.todos.some((todo) => todo.blocking) ? "needs_clarification" : "draft_ready";
     compactActivity(session, "草稿已保存，等待人工审核");
     await writeFile(path.join(workspace, "current-draft.json"), `${JSON.stringify(result.draft, null, 2)}\n`, "utf8");
@@ -219,6 +222,11 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
     throw error;
   } finally {
     runningSessions.delete(session.id);
+    const pendingTables = pendingDatasetReconciliations.get(session.id);
+    if (pendingTables) {
+      pendingDatasetReconciliations.delete(session.id);
+      await store.reconcileSessions(pendingTables, { onlySessionIds: [session.id] });
+    }
   }
 }
 
@@ -269,7 +277,7 @@ async function checkClaude() {
 async function allTodos() {
   const summaries = await store.listSessions();
   const sessions = await Promise.all(summaries.map((summary) => store.readSession(summary.id)));
-  return sessions.flatMap((session) => session?.todos ?? [])
+  return sessions.flatMap((session) => (session?.todos ?? []).filter((todo) => todo.status !== "dismissed"))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
@@ -473,6 +481,7 @@ async function handleDraftUpdate(request, response, sessionId) {
     { allowManualFlags: true },
   );
   session.draft = normalized.draft;
+  clearSessionStructureState(session);
   session.status = session.todos.some((todo) => todo.status === "open" && todo.blocking) ? "needs_clarification" : "draft_ready";
   session.error = null;
   const changeLabel = typeof body.label === "string" && body.label.trim()
@@ -530,6 +539,7 @@ async function handleTodoAnswer(request, response, todoId) {
   const datasetContext = await requestDatasetContext(body.datasetId || session.datasetId, table.tableName);
   const todo = session.todos.find((item) => item.id === todoId);
   if (!todo) throw Object.assign(new Error("待澄清项已不存在"), { statusCode: 404 });
+  if (todo.status !== "open") throw Object.assign(new Error("待澄清项已失效或已经处理"), { statusCode: 409 });
   todo.status = "answered";
   todo.answer = answer;
   todo.answeredAt = now();
@@ -572,7 +582,9 @@ async function handleRequest(request, response) {
     if (!Array.isArray(body.tables) || !body.tables.every(validTable)) {
       return jsonResponse(response, 400, { error: "缺少有效的导入表数据集" });
     }
-    const dataset = await store.syncDataset(body.tables);
+    const runningSessionIds = [...runningSessions.keys()];
+    runningSessionIds.forEach((sessionId) => pendingDatasetReconciliations.set(sessionId, body.tables));
+    const dataset = await store.syncDataset(body.tables, { skipSessionIds: runningSessionIds });
     return jsonResponse(response, 200, { dataset });
   }
   if (url.pathname === "/api/ai/sessions") {
@@ -614,6 +626,9 @@ async function handleRequest(request, response) {
     const session = await store.readSession(appliedMatch[1]);
     if (!session) return jsonResponse(response, 404, { error: "会话不存在" });
     if (!session.draft) return jsonResponse(response, 409, { error: "该会话没有可应用的草稿" });
+    if (session.status === "stale" || session.staleReason) {
+      return jsonResponse(response, 409, { error: "当前 Session 基于旧表结构，请先继续对话重新核对或人工保存当前结构" });
+    }
     session.status = "applied";
     session.appliedAt = now();
     session.messages.push(message("system", "人工已将本版草稿应用到表标注。"));

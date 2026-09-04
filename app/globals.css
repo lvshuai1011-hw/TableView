@@ -649,6 +649,8 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-table-workspace, .ai-batch-workspace, .ai-todo-list, .ai-review-list, .ai-prompt-settings, .ai-reference-settings { width: min(1280px, 100%); display: grid; align-content: start; gap: 12px; margin-inline: auto; padding: 18px 24px 32px; }
 .ai-table-workspace { height: 100%; grid-template-rows: auto minmax(0, 1fr); align-content: stretch; padding-bottom: 18px; overflow: hidden; }
 .ai-review-list, .ai-todo-list { width: min(980px, 100%); margin-inline: auto !important; }
+.ai-table-context-stack { min-width: 0; display: grid; gap: 8px; }
+.ai-table-context-stack .ai-structure-notice { margin: 0; }
 
 .ai-table-context { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 11px 13px; background: #fff; border: 1px solid #dce5e7; border-radius: 10px; }
 .ai-table-context > div:first-child { min-width: 0; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 9px; }

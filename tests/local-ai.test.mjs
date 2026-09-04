@@ -11,6 +11,7 @@ import {
   buildAnnotationPrompt,
   normalizePromptTemplate,
   normalizeStructuredOutput,
+  reconcileSessionWithTables,
   validateReferencePaths,
 } from "../local-ai/core.mjs";
 
@@ -210,6 +211,121 @@ test("keeps a durable index containing only Schema Atlas-created sessions", asyn
     assert.equal(summaries[0].source, "schema-atlas");
     assert.equal(summaries[0].claudeSessionId, session.id);
     assert.equal((await store.readSession(session.id)).tableName, "PE_FREE_UNIT");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("reconciles deleted fields and tables without deleting Session history", () => {
+  const timestamp = "2026-09-04T10:00:00.000Z";
+  const session = {
+    id: "44444444-4444-4444-8444-444444444444",
+    tableName: table.tableName,
+    status: "needs_clarification",
+    messages: [{ id: "old", role: "assistant", content: "已有完整标注", at: timestamp }],
+    todos: [
+      {
+        id: "field-todo",
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        tableName: table.tableName,
+        scope: "field",
+        fieldName: "FREE_UNIT_TYPE_ID",
+        question: "类型含义是什么？",
+        blocking: true,
+        status: "open",
+      },
+      {
+        id: "table-todo",
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        tableName: table.tableName,
+        scope: "table",
+        fieldName: "",
+        question: "实体边界是什么？",
+        blocking: false,
+        status: "open",
+      },
+    ],
+    draft: {
+      tableName: table.tableName,
+      className: "FreeUnitInstance",
+      columns: table.columns.map((column) => ({ name: column.name, entityColumn: column.name.toLowerCase() })),
+    },
+  };
+  const tableWithoutType = { ...table, columns: table.columns.filter((column) => column.name !== "FREE_UNIT_TYPE_ID") };
+
+  const fieldDeletion = reconcileSessionWithTables(session, [tableWithoutType], timestamp);
+  assert.equal(fieldDeletion.changed, true);
+  assert.equal(fieldDeletion.draftChanged, true);
+  assert.deepEqual(fieldDeletion.session.draft.columns.map((column) => column.name), ["FREE_UNIT_ID"]);
+  assert.equal(fieldDeletion.session.todos.find((todo) => todo.id === "field-todo").status, "dismissed");
+  assert.equal(fieldDeletion.session.todos.find((todo) => todo.id === "field-todo").dismissedReason, "field_deleted");
+  assert.equal(fieldDeletion.session.todos.find((todo) => todo.id === "table-todo").status, "open");
+  assert.equal(fieldDeletion.session.status, "draft_ready");
+  assert.deepEqual(fieldDeletion.session.removedFieldNames, ["FREE_UNIT_TYPE_ID"]);
+  assert.equal(fieldDeletion.session.messages[0].content, "已有完整标注");
+
+  const tableDeletion = reconcileSessionWithTables(fieldDeletion.session, [], timestamp);
+  assert.equal(tableDeletion.session.status, "stale");
+  assert.equal(tableDeletion.session.staleReason, "table_deleted");
+  assert.equal(tableDeletion.session.todos.find((todo) => todo.id === "table-todo").status, "dismissed");
+  assert.ok(tableDeletion.session.draft);
+  assert.equal(tableDeletion.session.messages[0].content, "已有完整标注");
+
+  const tableRestoration = reconcileSessionWithTables(tableDeletion.session, [table], timestamp);
+  assert.equal(tableRestoration.session.status, "stale");
+  assert.equal(tableRestoration.session.staleReason, "table_restored_requires_review");
+  assert.deepEqual(tableRestoration.session.restoredFieldNames, ["FREE_UNIT_TYPE_ID"]);
+  assert.deepEqual(tableRestoration.session.draft.columns.map((column) => column.name), ["FREE_UNIT_ID", "FREE_UNIT_TYPE_ID"]);
+  const repeated = reconcileSessionWithTables(tableRestoration.session, [table], timestamp);
+  assert.equal(repeated.changed, false);
+  assert.equal(repeated.session.messages.length, tableRestoration.session.messages.length);
+});
+
+test("dataset sync persists reconciliation while retaining the historical Session", async () => {
+  const temp = await mkdtemp(path.join(projectRoot, ".schema-atlas-reconcile-test-"));
+  try {
+    const store = new AtlasStore(temp);
+    await store.init();
+    const session = await store.createSession({ table });
+    session.status = "needs_clarification";
+    session.draft = normalizeStructuredOutput({ draft: { columns: [] }, todos: [] }, table, session.id).draft;
+    session.todos = [{
+      id: "persisted-field-todo",
+      sessionId: session.id,
+      tableName: table.tableName,
+      scope: "field",
+      fieldName: "FREE_UNIT_TYPE_ID",
+      question: "类型含义是什么？",
+      reason: "需要核对",
+      checkedSources: ["input-table.json"],
+      suggestions: [],
+      blocking: true,
+      status: "open",
+      answer: "",
+      createdAt: "2026-09-04T10:00:00.000Z",
+      answeredAt: null,
+    }];
+    await store.saveSession(session);
+
+    const tableWithoutType = { ...table, columns: table.columns.filter((column) => column.name !== "FREE_UNIT_TYPE_ID") };
+    const manifest = await store.syncDataset([tableWithoutType]);
+    assert.equal(manifest.reconciliation.updatedSessions, 1);
+    const afterFieldDelete = await store.readSession(session.id);
+    assert.equal(afterFieldDelete.status, "draft_ready");
+    assert.deepEqual(afterFieldDelete.draft.columns.map((column) => column.name), ["FREE_UNIT_ID"]);
+    assert.equal(afterFieldDelete.todos[0].status, "dismissed");
+    assert.equal((await store.listSessions())[0].todoCount, 0);
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(store.workspacePath(session.id), "current-draft.json"), "utf8")).columns.map((column) => column.name),
+      ["FREE_UNIT_ID"],
+    );
+
+    await store.syncDataset([]);
+    const afterTableDelete = await store.readSession(session.id);
+    assert.equal(afterTableDelete.status, "stale");
+    assert.equal(afterTableDelete.staleReason, "table_deleted");
+    assert.ok(afterTableDelete.draft);
+    assert.equal((await store.listSessions()).length, 1);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

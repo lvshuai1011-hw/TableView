@@ -195,6 +195,176 @@ function normalizeTodo(value, tableName, sessionId) {
   };
 }
 
+function systemMessage(content, at) {
+  return { id: randomUUID(), role: "system", content, at };
+}
+
+function dismissTodo(todo, reason, at) {
+  if (todo.status !== "open") return todo;
+  return {
+    ...todo,
+    status: "dismissed",
+    dismissedReason: reason,
+    dismissedAt: at,
+  };
+}
+
+function uniqueNames(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map(stringValue).filter(Boolean))];
+}
+
+function markSessionStale(session, reason, at) {
+  if (session.status !== "stale") session.stalePreviousStatus = session.status;
+  session.status = "stale";
+  session.staleReason = reason;
+  session.staleAt = at;
+}
+
+/**
+ * Reconcile one historical AI Session with the latest imported table structure.
+ * The transcript is never deleted. Only open work that points at a deleted
+ * object is dismissed, while restored/new structure makes the old draft stale.
+ */
+export function reconcileSessionWithTables(value, rawTables, at = new Date().toISOString()) {
+  const session = value && typeof value === "object" ? value : {};
+  const tables = Array.isArray(rawTables) ? rawTables : [];
+  const table = tables.find((item) => stringValue(item?.tableName) === stringValue(session.tableName));
+  const next = {
+    ...session,
+    messages: Array.isArray(session.messages) ? [...session.messages] : [],
+    todos: Array.isArray(session.todos) ? session.todos.map((todo) => ({ ...todo })) : [],
+    draft: session.draft && typeof session.draft === "object"
+      ? { ...session.draft, columns: Array.isArray(session.draft.columns) ? [...session.draft.columns] : [] }
+      : session.draft ?? null,
+  };
+  let changed = false;
+  let draftChanged = false;
+
+  if (!table) {
+    const dismissedCount = next.todos.filter((todo) => todo.status === "open").length;
+    if (dismissedCount > 0) {
+      next.todos = next.todos.map((todo) => dismissTodo(todo, "table_deleted", at));
+      changed = true;
+    }
+    const transitioned = next.status !== "stale" || next.staleReason !== "table_deleted";
+    if (transitioned) {
+      markSessionStale(next, "table_deleted", at);
+      next.messages.push(systemMessage(
+        `表 ${session.tableName} 已从当前数据集中删除；此 Session 已移出待审核和待澄清队列，完整对话与旧草稿仍保留。`,
+        at,
+      ));
+      changed = true;
+    }
+    return { session: next, changed, draftChanged, tableDeleted: transitioned, removedFields: [] };
+  }
+
+  const wasTableDeleted = session.staleReason === "table_deleted";
+  if (wasTableDeleted) {
+    markSessionStale(next, "table_restored_requires_review", at);
+    next.messages.push(systemMessage(
+      `表 ${session.tableName} 已恢复到当前数据集，但此 Session 基于删除前结构；请继续原 Session 重新核对，或人工保存当前结构后再应用。`,
+      at,
+    ));
+    changed = true;
+  }
+
+  const currentColumns = Array.isArray(table.columns) ? table.columns : [];
+  const currentNames = new Map(currentColumns.map((column) => [stringValue(column?.name).toUpperCase(), stringValue(column?.name)]));
+  const draftColumns = Array.isArray(next.draft?.columns) ? next.draft.columns : [];
+  const draftNames = new Map(draftColumns.map((column) => [stringValue(column?.name).toUpperCase(), stringValue(column?.name)]));
+  const removedFields = draftColumns
+    .filter((column) => !currentNames.has(stringValue(column?.name).toUpperCase()))
+    .map((column) => stringValue(column?.name))
+    .filter(Boolean);
+  const missingTodoFields = next.todos
+    .filter((todo) => todo.status === "open" && todo.scope === "field" && todo.fieldName
+      && !currentNames.has(stringValue(todo.fieldName).toUpperCase()))
+    .map((todo) => stringValue(todo.fieldName));
+  const previouslyRemovedNames = uniqueNames(session.removedFieldNames);
+  const newlyRemoved = uniqueNames([...removedFields, ...missingTodoFields])
+    .filter((name) => !previouslyRemovedNames.includes(name));
+
+  if (removedFields.length > 0) {
+    next.draft = {
+      ...next.draft,
+      columns: draftColumns.filter((column) => currentNames.has(stringValue(column?.name).toUpperCase())),
+    };
+    draftChanged = true;
+    changed = true;
+  }
+  if (missingTodoFields.length > 0) {
+    next.todos = next.todos.map((todo) => (
+      todo.scope === "field" && todo.fieldName && !currentNames.has(stringValue(todo.fieldName).toUpperCase())
+        ? dismissTodo(todo, "field_deleted", at)
+        : todo
+    ));
+    changed = true;
+  }
+  if (newlyRemoved.length > 0) {
+    next.removedFieldNames = uniqueNames([...(session.removedFieldNames ?? []), ...newlyRemoved]);
+    next.structureChangedAt = at;
+    next.messages.push(systemMessage(
+      `字段 ${newlyRemoved.join("、")} 已从当前表结构删除；对应草稿项与待澄清项已失效，同表其他标注保持不变。`,
+      at,
+    ));
+    changed = true;
+  }
+
+  const addedColumns = next.draft
+    ? currentColumns.filter((column) => !draftNames.has(stringValue(column?.name).toUpperCase()))
+    : [];
+  const addedFields = addedColumns.map((column) => stringValue(column?.name)).filter(Boolean);
+  if (addedFields.length > 0) {
+    const previouslyRemoved = new Set(previouslyRemovedNames.map((name) => name.toUpperCase()));
+    const restoredFields = addedFields.filter((name) => previouslyRemoved.has(name.toUpperCase()));
+    const nextReason = restoredFields.length > 0
+      ? "fields_restored_requires_review"
+      : "fields_added_requires_review";
+    const alreadyRecorded = [nextReason, "table_restored_requires_review"].includes(session.staleReason)
+      && addedFields.every((name) => uniqueNames(session.restoredFieldNames).includes(name));
+    if (!alreadyRecorded) {
+      if (!wasTableDeleted) markSessionStale(next, nextReason, at);
+      next.restoredFieldNames = uniqueNames([...(session.restoredFieldNames ?? []), ...addedFields]);
+      next.removedFieldNames = previouslyRemovedNames
+        .filter((name) => !restoredFields.some((restored) => restored.toUpperCase() === name.toUpperCase()));
+      next.draft = {
+        ...next.draft,
+        columns: [...next.draft.columns, ...addedColumns.map((column) => normalizeColumnDraft({}, column, { allowManualFlags: true }))],
+      };
+      draftChanged = true;
+      if (!wasTableDeleted) {
+        next.messages.push(systemMessage(
+          `${restoredFields.length > 0 ? "已恢复" : "已新增"}字段 ${addedFields.join("、")}；已按当前表结构补入草稿，继续原 Session 重新核对或人工保存后，才可再次应用。`,
+          at,
+        ));
+      }
+      changed = true;
+    }
+  }
+
+  if (["needs_clarification", "draft_ready"].includes(next.status)) {
+    const nextStatus = next.todos.some((todo) => todo.status === "open" && todo.blocking)
+      ? "needs_clarification"
+      : next.draft ? "draft_ready" : "idle";
+    if (nextStatus !== next.status) {
+      next.status = nextStatus;
+      changed = true;
+    }
+  }
+
+  return { session: next, changed, draftChanged, tableDeleted: false, removedFields: newlyRemoved };
+}
+
+export function clearSessionStructureState(session) {
+  delete session.staleReason;
+  delete session.staleAt;
+  delete session.stalePreviousStatus;
+  delete session.removedFieldNames;
+  delete session.restoredFieldNames;
+  delete session.structureChangedAt;
+  return session;
+}
+
 export function normalizeStructuredOutput(value, table, sessionId, options = {}) {
   const source = value && typeof value === "object" ? value : {};
   const rawDraft = source.draft && typeof source.draft === "object" ? source.draft : {};
@@ -583,7 +753,7 @@ export class AtlasStore {
   jobPath(id) { return path.join(this.jobsDir, `${safeId(id)}.json`); }
   datasetPath(id) { return path.join(this.datasetsDir, safeDatasetId(id)); }
 
-  async syncDataset(rawTables) {
+  async syncDataset(rawTables, { skipSessionIds = [] } = {}) {
     if (!Array.isArray(rawTables)) throw new Error("数据集必须是表数组");
     const tables = [...rawTables].sort((a, b) => String(a.tableName).localeCompare(String(b.tableName)));
     const names = new Set();
@@ -594,7 +764,7 @@ export class AtlasStore {
       names.add(name);
     });
     const id = createHash("sha256").update(canonicalJson(tables)).digest("hex");
-    return this.serialize(async () => {
+    const manifest = await this.serialize(async () => {
       const datasetDir = this.datasetPath(id);
       const manifestPath = path.join(datasetDir, "manifest.json");
       let manifest = await this.readJson(manifestPath, null);
@@ -618,6 +788,8 @@ export class AtlasStore {
       });
       return manifest;
     });
+    const reconciliation = await this.reconcileSessions(tables, { skipSessionIds });
+    return { ...manifest, reconciliation };
   }
 
   async readDatasetContext(datasetId, tableName) {
@@ -691,6 +863,11 @@ export class AtlasStore {
         messageCount: session.messages.length,
         todoCount: session.todos.filter((todo) => todo.status === "open").length,
         hasDraft: Boolean(session.draft),
+        staleReason: session.staleReason ?? null,
+        staleAt: session.staleAt ?? null,
+        removedFieldNames: uniqueNames(session.removedFieldNames),
+        restoredFieldNames: uniqueNames(session.restoredFieldNames),
+        structureChangedAt: session.structureChangedAt ?? null,
         error: session.error ?? null,
       };
       const next = [summary, ...index.filter((item) => item.id !== session.id)]
@@ -698,6 +875,35 @@ export class AtlasStore {
       await this.atomicWrite(this.sessionIndexPath, next);
       return session;
     });
+  }
+
+  async reconcileSessions(tables, { skipSessionIds = [], onlySessionIds = [] } = {}) {
+    const skipped = new Set(skipSessionIds);
+    const limited = new Set(onlySessionIds);
+    const summaries = await this.listSessions();
+    const result = { updatedSessions: 0, deletedTables: 0, removedFields: 0, skippedSessions: 0 };
+    for (const summary of summaries) {
+      if (limited.size > 0 && !limited.has(summary.id)) continue;
+      if (skipped.has(summary.id) || ["queued", "running", "cancelling"].includes(summary.status)) {
+        result.skippedSessions += 1;
+        continue;
+      }
+      const session = await this.readSession(summary.id);
+      if (!session) continue;
+      const reconciled = reconcileSessionWithTables(session, tables);
+      if (!reconciled.changed) continue;
+      await this.saveSession(reconciled.session);
+      if (reconciled.draftChanged && reconciled.session.draft) {
+        await this.atomicWrite(
+          path.join(this.workspacePath(reconciled.session.id), "current-draft.json"),
+          reconciled.session.draft,
+        );
+      }
+      result.updatedSessions += 1;
+      if (reconciled.tableDeleted) result.deletedTables += 1;
+      result.removedFields += reconciled.removedFields.length;
+    }
+    return result;
   }
 
   async createSession({ table, jobId = null, datasetId = null, referencePaths = [], promptTemplate = "" }) {

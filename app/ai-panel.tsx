@@ -101,6 +101,7 @@ function statusLabel(status: string) {
     cancelled: "已停止",
     completed: "已完成",
     completed_with_errors: "部分失败",
+    stale: "结构已变化",
   } as Record<string, string>)[status] ?? status;
 }
 
@@ -108,7 +109,7 @@ function statusClass(status: string) {
   if (["completed", "applied"].includes(status)) return "is-success";
   if (["failed", "completed_with_errors"].includes(status)) return "is-error";
   if (["running", "queued", "cancelling"].includes(status)) return "is-running";
-  if (status === "needs_clarification") return "is-warning";
+  if (["needs_clarification", "stale"].includes(status)) return "is-warning";
   return "";
 }
 
@@ -194,6 +195,25 @@ function SessionTrace({ session }: { session: AiSession }) {
       {item.detail && <pre>{item.detail}</pre>}
     </details>)}</div> : <p className="ai-trace-empty">这个 Session 还没有 Claude Code 流事件。</p>}
   </section>;
+}
+
+function SessionStructureNotice({ session }: { session: AiSession | AiSessionSummary }) {
+  const removedFields = session.removedFieldNames ?? [];
+  const restoredFields = session.restoredFieldNames ?? [];
+  let detail = "";
+  if (session.staleReason === "table_deleted") {
+    detail = "这张表已从当前数据集中删除。Session、完整对话和旧草稿仍保留，但不会再出现在待审核或待澄清队列。";
+  } else if (session.staleReason === "table_restored_requires_review") {
+    detail = "这张表已经恢复，但当前 Session 基于删除前的结构。请继续原 Session 重新核对，或人工编辑并保存当前结构后再应用。";
+  } else if (session.staleReason === "fields_restored_requires_review") {
+    detail = `字段 ${restoredFields.join("、") || "已删除字段"} 已恢复并按当前表结构补入草稿；重新核对或人工保存后才可应用。`;
+  } else if (session.staleReason === "fields_added_requires_review") {
+    detail = `当前表新增了字段 ${restoredFields.join("、") || "（名称未记录）"}，并已补入草稿；重新核对或人工保存后才可应用。`;
+  } else if (removedFields.length > 0) {
+    detail = `字段 ${removedFields.join("、")} 已删除，对应草稿项和待澄清项已自动失效；同表其他标注保持不变。`;
+  }
+  if (!detail) return null;
+  return <div className="ai-session-table-missing ai-structure-notice"><CircleAlert size={14} /><span>{detail}</span></div>;
 }
 
 function TodoCard({ todo, busy, onAnswer }: { todo: AiTodo; busy: boolean; onAnswer: (todo: AiTodo, answer: string) => void }) {
@@ -583,6 +603,10 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
 
   const applyDraft = async () => {
     if (!activeTable || !selectedSession?.draft) return;
+    if (selectedSession.status === "stale" || selectedSession.staleReason) {
+      toast.error("旧结构草稿不能直接应用", { description: "请继续原 Session 重新核对，或人工编辑并保存当前结构。" });
+      return;
+    }
     try {
       onApplyDraft(selectedSession.draft, selectedSession);
     } catch (error) {
@@ -646,10 +670,16 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
     .filter((key, index, items) => !PROMPT_VARIABLES.includes(key) && items.indexOf(key) === index);
   const hasDatasetContextVariable = /\{\{\s*dataset_context\s*\}\}/.test(promptTemplate);
   const promptValid = Boolean(promptTemplate.trim()) && unknownPromptVariables.length === 0;
-  const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open") ?? [];
+  const tableIndex = new Map(tables.map((table) => [table.tableName, table]));
+  const todoMatchesCurrentStructure = (todo: AiTodo) => {
+    const table = tableIndex.get(todo.tableName);
+    if (!table) return false;
+    return todo.scope !== "field" || table.columns.some((column) => column.name === todo.fieldName);
+  };
+  const currentTodos = selectedSession?.todos.filter((todo) => todo.status === "open" && todoMatchesCurrentStructure(todo)) ?? [];
   const classTodos = currentTodos.filter((todo) => todo.scope !== "field");
-  const openTodos = todos.filter((todo) => todo.status === "open");
-  const reviewSessions = sessions.filter((session) => session.status === "draft_ready");
+  const openTodos = todos.filter((todo) => todo.status === "open" && todoMatchesCurrentStructure(todo));
+  const reviewSessions = sessions.filter((session) => session.status === "draft_ready" && tableIndex.has(session.tableName));
   const selectedSessionCount = [...selectedSessionIds].filter((id) => sessions.some((session) => session.id === id)).length;
   const allSessionsSelected = sessions.length > 0 && selectedSessionCount === sessions.length;
 
@@ -676,7 +706,10 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
 
         <TabsContent value="work" className="ai-tab-content">
           {activeTable ? <div className="ai-table-workspace">
-            <div className="ai-table-context"><div><span>当前表</span><code>{activeTable.tableName}</code><small>{activeTable.className} · {activeTable.columns.length} 个字段</small></div><div className="ai-table-context-actions">{tableSessions.length > 1 && <Select value={selectedSession?.tableName === activeTable.tableName ? selectedSession.id : tableSessions[0]?.id} onValueChange={selectSession}><SelectTrigger size="sm"><SelectValue placeholder="选择会话" /></SelectTrigger><SelectContent>{tableSessions.map((session) => <SelectItem key={session.id} value={session.id}>{shortTime(session.updatedAt)} · {statusLabel(session.status)}</SelectItem>)}</SelectContent></Select>}<button type="button" onClick={() => onReviewTable(null)}>返回批量</button></div></div>
+            <div className="ai-table-context-stack">
+              <div className="ai-table-context"><div><span>当前表</span><code>{activeTable.tableName}</code><small>{activeTable.className} · {activeTable.columns.length} 个字段</small></div><div className="ai-table-context-actions">{tableSessions.length > 1 && <Select value={selectedSession?.tableName === activeTable.tableName ? selectedSession.id : tableSessions[0]?.id} onValueChange={selectSession}><SelectTrigger size="sm"><SelectValue placeholder="选择会话" /></SelectTrigger><SelectContent>{tableSessions.map((session) => <SelectItem key={session.id} value={session.id}>{shortTime(session.updatedAt)} · {statusLabel(session.status)}</SelectItem>)}</SelectContent></Select>}<button type="button" onClick={() => onReviewTable(null)}>返回批量</button></div></div>
+              {activeConversationSession && <SessionStructureNotice session={activeConversationSession} />}
+            </div>
             <div className="ai-review-workbench">
               <section className="ai-review-pane ai-review-conversation-pane">
                 <header><div><MessageSquareText size={15} /><strong>原 Session 对话</strong></div>{activeConversationSession && <Badge variant="outline" className={statusClass(activeConversationSession.status)}>{statusLabel(activeConversationSession.status)}</Badge>}</header>
@@ -719,7 +752,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
                         {fieldTodos.map((todo) => <TodoCard key={todo.id} todo={todo} busy={answeringTodo === todo.id} onAnswer={answerTodo} />)}
                       </article>;
                     })}</div></div>
-                    <div className="ai-draft-apply"><span>人工编辑只保存到本 Session；应用后才写入表级变更记录。</span><Button onClick={applyDraft} disabled={chatBusy || draftSaving || activeConversationSession.status === "applied" || draftValidationErrors.length > 0}>{activeConversationSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{activeConversationSession.status === "applied" ? "草稿已应用" : "应用到当前表"}</Button></div>
+                    <div className="ai-draft-apply"><span>{activeConversationSession.status === "stale" || activeConversationSession.staleReason ? "表结构已变化，请先重新核对或人工保存当前结构。" : "人工编辑只保存到本 Session；应用后才写入表级变更记录。"}</span><Button onClick={applyDraft} disabled={chatBusy || draftSaving || activeConversationSession.status === "applied" || activeConversationSession.status === "stale" || Boolean(activeConversationSession.staleReason) || draftValidationErrors.length > 0}>{activeConversationSession.status === "applied" ? <CheckCircle2 size={15} /> : <FileCheck2 size={15} />}{activeConversationSession.status === "applied" ? "草稿已应用" : activeConversationSession.status === "stale" || activeConversationSession.staleReason ? "需重新核对" : "应用到当前表"}</Button></div>
                   </section> : <EmptyState icon={FileCheck2} title="等待生成审核草稿" detail="左侧完成第一轮生成后，类、字段、枚举和待澄清项会在这里按对象展示。" />}
                 </div>
               </section>
@@ -770,7 +803,7 @@ export function AiPanel({ open, onOpenChange, tables, datasetReady, initialTable
             {sessions.map((session) => <SessionListItem key={session.id} session={session} active={selectedSessionId === session.id} selected={selectedSessionIds.has(session.id)} onClick={() => selectSession(session.id)} onSelectedChange={(checked) => setSessionSelected(session.id, checked)} />)}
             {sessions.length === 0 && <EmptyState icon={MessageSquareText} title="暂无 Session" detail="生成一张表或启动批量任务后，会话会出现在这里。" />}
           </div>
-          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" disabled={!selectedSessionTable} onClick={() => openSessionConversation(selectedSession.id, selectedSession.tableName)}>{selectedSessionTable ? "打开表审核" : "对应表已删除"}</Button></div></div><SessionTranscript session={selectedSession} />{selectedSessionTable ? <div className="ai-session-reply"><Textarea value={sessionMessage} onChange={(event) => setSessionMessage(event.target.value)} placeholder="继续补充要求、指出错误或要求 Claude Code 重新核对资料…" rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage("")); }} /><div><span>{selectedConversationBusy ? "当前 Session 正在执行，完成后可继续" : "消息会通过 Claude Code --resume 接到原上下文"}</span><Button size="sm" onClick={() => void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage(""))} disabled={chatBusy || selectedConversationBusy || !health?.ready || !sessionMessage.trim() || !promptValid}>{chatBusy || selectedConversationBusy ? <Loader2 size={14} className="spin" /> : <Send size={14} />}{selectedConversationBusy ? "执行中" : "继续对话"}</Button></div></div> : <div className="ai-session-table-missing"><CircleAlert size={14} /><span>当前数据中找不到这张表。恢复或重新导入后，才能带着最新表结构继续此 Session。</span></div>}<SessionTrace session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整对话、工具调用及读取资料的过程。" />}</div>
+          <div className="ai-session-detail">{loadingSession ? <div className="ai-loading"><Loader2 size={18} className="spin" />读取完整对话…</div> : selectedSession ? <><div className="ai-session-detail-head"><div><code>{selectedSession.tableName}</code><span>{selectedSession.name}</span>{selectedSession.datasetId && <small>数据集 {selectedSession.datasetId.slice(0, 10)} · {selectedSession.relatedTableCount ?? 0} 张直接关联表</small>}</div><div><Badge variant="outline" className={statusClass(selectedSession.status)}>{statusLabel(selectedSession.status)}</Badge><Button variant="outline" size="sm" disabled={!selectedSessionTable} onClick={() => openSessionConversation(selectedSession.id, selectedSession.tableName)}>{selectedSessionTable ? "打开表审核" : "对应表已删除"}</Button></div></div><SessionStructureNotice session={selectedSession} /><SessionTranscript session={selectedSession} />{selectedSessionTable ? <div className="ai-session-reply"><Textarea value={sessionMessage} onChange={(event) => setSessionMessage(event.target.value)} placeholder="继续补充要求、指出错误或要求 Claude Code 重新核对资料…" rows={3} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage("")); }} /><div><span>{selectedConversationBusy ? "当前 Session 正在执行，完成后可继续" : "消息会通过 Claude Code --resume 接到原上下文"}</span><Button size="sm" onClick={() => void runSessionTurn(selectedSessionTable, selectedSession, sessionMessage, () => setSessionMessage(""))} disabled={chatBusy || selectedConversationBusy || !health?.ready || !sessionMessage.trim() || !promptValid}>{chatBusy || selectedConversationBusy ? <Loader2 size={14} className="spin" /> : <Send size={14} />}{selectedConversationBusy ? "执行中" : "继续对话"}</Button></div></div> : <div className="ai-session-table-missing"><CircleAlert size={14} /><span>此 Session 现在只读。恢复或重新导入对应表后，可以带着最新表结构继续对话。</span></div>}<SessionTrace session={selectedSession} />{selectedSession.promptTemplate && <details className="ai-session-prompt"><summary>查看本 Session 最近使用的提示词模板</summary><pre>{selectedSession.promptTemplate}</pre></details>}</> : <EmptyState icon={TerminalSquare} title="选择一个 Session" detail="这里会展示完整对话、工具调用及读取资料的过程。" />}</div>
         </TabsContent>
 
         <TabsContent value="todos" className="ai-tab-content ai-todo-list">

@@ -46,10 +46,12 @@ export type AiTodo = {
   checkedSources?: string[];
   suggestions: string[];
   blocking: boolean;
-  status: "open" | "answered";
+  status: "open" | "answered" | "dismissed";
   answer: string;
   createdAt: string;
   answeredAt: string | null;
+  dismissedAt?: string | null;
+  dismissedReason?: "field_deleted" | "table_deleted";
 };
 
 export type AiActivity = { id: string; label: string; at: string };
@@ -78,6 +80,11 @@ export type AiSessionSummary = {
   messageCount: number;
   todoCount: number;
   hasDraft: boolean;
+  staleReason?: "table_deleted" | "table_restored_requires_review" | "fields_restored_requires_review" | "fields_added_requires_review" | null;
+  staleAt?: string | null;
+  removedFieldNames?: string[];
+  restoredFieldNames?: string[];
+  structureChangedAt?: string | null;
   error: string | null;
 };
 
