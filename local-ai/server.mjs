@@ -27,12 +27,25 @@ const host = process.env.SCHEMA_ATLAS_AI_HOST || "127.0.0.1";
 const port = Number(process.env.SCHEMA_ATLAS_AI_PORT || 4317);
 const store = new AtlasStore(storeRoot);
 const runningSessions = new Map();
+const activeSessionTurns = new Set();
+const scheduledSessionTurns = new Set();
+const pendingClarificationDrains = new Set();
+const cancelledSessionTurns = new Set();
 const pendingDatasetReconciliations = new Map();
 const runningJobs = new Set();
 const cancelledJobs = new Set();
 let allowedRoots = [];
 let healthCache = null;
 let defaultPromptTemplate = "";
+
+const SESSION_TURN_CANCELLED_MESSAGE = "本轮 Claude Code 执行已由人工停止。此前对话、草稿和澄清内容均已保留，可以继续原 Session。";
+
+class SessionTurnCancelledError extends Error {
+  constructor() {
+    super("本轮 Claude Code 执行已停止");
+    this.name = "SessionTurnCancelledError";
+  }
+}
 
 function now() { return new Date().toISOString(); }
 
@@ -94,6 +107,61 @@ function compactActivity(session, label) {
   session.activities = session.activities.slice(-200);
 }
 
+function mergeRecordsById(...groups) {
+  const records = new Map();
+  groups.flat().filter(Boolean).forEach((entry) => records.set(entry.id, entry));
+  return [...records.values()].sort((left, right) => String(left.at ?? "").localeCompare(String(right.at ?? "")));
+}
+
+function restorePendingClarifications(session, todoIds) {
+  if (!todoIds?.size) return;
+  session.todos = session.todos.map((todo) => todoIds.has(todo.id) ? { ...todo, revisionPending: true } : todo);
+}
+
+function todoIdentity(todo) {
+  return [todo.scope, String(todo.fieldName ?? "").toUpperCase(), String(todo.question ?? "").trim()].join("\u0000");
+}
+
+function mergeSessionTodos(existingTodos, generatedTodos) {
+  const merged = existingTodos.map((todo) => ({ ...todo }));
+  const indexes = new Map(merged.map((todo, index) => [todoIdentity(todo), index]));
+  generatedTodos.forEach((generated) => {
+    const key = todoIdentity(generated);
+    const existingIndex = indexes.get(key);
+    if (existingIndex === undefined) {
+      indexes.set(key, merged.length);
+      merged.push(generated);
+      return;
+    }
+    const existing = merged[existingIndex];
+    if (existing.status !== "open") return;
+    merged[existingIndex] = {
+      ...generated,
+      id: existing.id,
+      status: "open",
+      answer: "",
+      createdAt: existing.createdAt,
+      answeredAt: null,
+    };
+  });
+  return merged;
+}
+
+async function persistCancelledTurn(turnSession, onEvent = () => {}, pendingAtStart = new Set()) {
+  const session = await store.updateSession(turnSession.id, (latest) => {
+    latest.messages = mergeRecordsById(latest.messages, turnSession.messages);
+    latest.activities = mergeRecordsById(latest.activities, turnSession.activities);
+    restorePendingClarifications(latest, pendingAtStart);
+    latest.status = "cancelled";
+    latest.error = null;
+    latest.messages.push(message("system", SESSION_TURN_CANCELLED_MESSAGE));
+    compactActivity(latest, "本轮执行已由人工停止");
+    return latest;
+  });
+  if (session) onEvent({ type: "cancelled", session });
+  return session;
+}
+
 function parseLines(onLine) {
   let buffer = "";
   return {
@@ -132,19 +200,14 @@ function claudeArguments(session, referencePaths, datasetDirectory) {
 }
 
 async function runClaudeTurn({ session, table, userMessage, mode, datasetContext, referencePaths, promptTemplate, onEvent = () => {} }) {
-  if (runningSessions.has(session.id)) throw Object.assign(new Error("该会话正在运行，请等待本轮完成"), { statusCode: 409 });
+  if (runningSessions.has(session.id) || activeSessionTurns.has(session.id)) {
+    throw Object.assign(new Error("该会话正在运行，请等待本轮完成"), { statusCode: 409 });
+  }
   if (session.jobId && cancelledJobs.has(session.jobId)) throw new Error("批量任务已停止");
   if (!datasetContext) throw Object.assign(new Error("缺少当前表的数据集上下文"), { statusCode: 400 });
+  activeSessionTurns.add(session.id);
+  const pendingAtStart = new Set(session.todos.filter((todo) => todo.revisionPending === true).map((todo) => todo.id));
   const workspace = store.workspacePath(session.id);
-  await writeFile(path.join(workspace, "input-table.json"), `${JSON.stringify(table, null, 2)}\n`, "utf8");
-  await writeFile(path.join(workspace, "dataset-context.json"), `${JSON.stringify(datasetContext, null, 2)}\n`, "utf8");
-  if (session.draft) await writeFile(path.join(workspace, "current-draft.json"), `${JSON.stringify(session.draft, null, 2)}\n`, "utf8");
-  const clarifications = session.todos.filter((todo) => todo.status === "answered" && todo.answer);
-  await writeFile(path.join(workspace, "reference-paths.json"), `${JSON.stringify(referencePaths, null, 2)}\n`, "utf8");
-  await writeFile(path.join(workspace, "clarifications.json"), `${JSON.stringify(clarifications, null, 2)}\n`, "utf8");
-  const prompt = buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, datasetContext, referencePaths, clarifications });
-
-  session.status = "running";
   session.error = null;
   session.referencePaths = referencePaths;
   session.datasetId = datasetContext.datasetId;
@@ -152,48 +215,73 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
   session.promptTemplate = promptTemplate;
   session.messages.push(message("user", userMessage));
   compactActivity(session, `准备当前表与 ${datasetContext.relatedTables.length} 张关联表`);
-  await store.saveSession(session);
-  onEvent({ type: "started", session: await store.readSession(session.id) });
-
-  const events = [];
-  const stderr = [];
-  let rawWrite = Promise.resolve();
-  const child = spawn(claudeBin, claudeArguments(session, referencePaths, datasetContext.datasetDir), {
-    cwd: workspace,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"],
-    shell: false,
-  });
-  runningSessions.set(session.id, child);
-  if (session.jobId && cancelledJobs.has(session.jobId)) child.kill("SIGTERM");
-  child.stdin.on("error", () => {});
-  child.stdin.end(prompt);
-
-  const parser = parseLines((line) => {
-    let event;
-    try { event = JSON.parse(line); }
-    catch { event = { type: "unparsed", text: line }; }
-    events.push(event);
-    rawWrite = rawWrite.then(() => store.appendRawEvent(session.id, event));
-    const label = describeStreamEvent(event);
-    if (label) {
-      compactActivity(session, label);
-      onEvent({ type: "activity", label, at: now() });
-    }
-  });
-  child.stdout.on("data", (chunk) => parser.push(chunk));
-  child.stderr.on("data", (chunk) => {
-    stderr.push(chunk);
-    if (Buffer.concat(stderr).length > 64 * 1024) stderr.shift();
-  });
 
   try {
+    await writeFile(path.join(workspace, "input-table.json"), `${JSON.stringify(table, null, 2)}\n`, "utf8");
+    await writeFile(path.join(workspace, "dataset-context.json"), `${JSON.stringify(datasetContext, null, 2)}\n`, "utf8");
+    if (session.draft) await writeFile(path.join(workspace, "current-draft.json"), `${JSON.stringify(session.draft, null, 2)}\n`, "utf8");
+    const clarifications = session.todos.filter((todo) => todo.status === "answered" && todo.answer);
+    await writeFile(path.join(workspace, "reference-paths.json"), `${JSON.stringify(referencePaths, null, 2)}\n`, "utf8");
+    await writeFile(path.join(workspace, "clarifications.json"), `${JSON.stringify(clarifications, null, 2)}\n`, "utf8");
+    const prompt = buildAnnotationPrompt({ promptTemplate, table, mode, userMessage, datasetContext, referencePaths, clarifications });
+
+    if (cancelledSessionTurns.has(session.id)) throw new SessionTurnCancelledError();
+    session = await store.updateSession(session.id, (latest) => {
+      latest.status = "running";
+      latest.error = null;
+      latest.referencePaths = referencePaths;
+      latest.datasetId = datasetContext.datasetId;
+      latest.relatedTableCount = datasetContext.relatedTables.length;
+      latest.promptTemplate = promptTemplate;
+      latest.messages = mergeRecordsById(latest.messages, session.messages);
+      latest.activities = mergeRecordsById(latest.activities, session.activities);
+      if (pendingAtStart.size > 0) {
+        latest.todos = latest.todos.map((todo) => pendingAtStart.has(todo.id) ? { ...todo, revisionPending: false } : todo);
+      }
+      return latest;
+    });
+    if (!session) throw new Error("Session 已被删除");
+    onEvent({ type: "started", session });
+
+    const events = [];
+    const stderr = [];
+    let rawWrite = Promise.resolve();
+    const child = spawn(claudeBin, claudeArguments(session, referencePaths, datasetContext.datasetDir), {
+      cwd: workspace,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+    });
+    runningSessions.set(session.id, child);
+    if (session.jobId && cancelledJobs.has(session.jobId)) child.kill("SIGTERM");
+    child.stdin.on("error", () => {});
+    child.stdin.end(prompt);
+
+    const parser = parseLines((line) => {
+      let event;
+      try { event = JSON.parse(line); }
+      catch { event = { type: "unparsed", text: line }; }
+      events.push(event);
+      rawWrite = rawWrite.then(() => store.appendRawEvent(session.id, event));
+      const label = describeStreamEvent(event);
+      if (label) {
+        compactActivity(session, label);
+        onEvent({ type: "activity", label, at: now() });
+      }
+    });
+    child.stdout.on("data", (chunk) => parser.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      if (Buffer.concat(stderr).length > 64 * 1024) stderr.shift();
+    });
+
     const exitCode = await new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("close", resolve);
     });
     parser.flush();
     await rawWrite;
+    if (cancelledSessionTurns.has(session.id)) throw new SessionTurnCancelledError();
     if (exitCode !== 0) {
       const detail = Buffer.concat(stderr).toString("utf8").trim();
       throw new Error(detail || `Claude Code 退出码为 ${exitCode}`);
@@ -201,33 +289,109 @@ async function runClaudeTurn({ session, table, userMessage, mode, datasetContext
     const structured = parseStructuredResult(events);
     if (!structured) throw new Error("Claude Code 未返回符合约定的结构化标注");
     const result = normalizeStructuredOutput(structured, table, session.id);
-    const retainedTodos = session.todos.filter((todo) => ["answered", "dismissed"].includes(todo.status));
-    session.draft = result.draft;
-    session.todos = [...retainedTodos, ...result.todos];
-    session.messages.push(message("assistant", result.reply, { draftUpdated: true, todoCount: result.todos.length }));
-    session.turnCount += 1;
-    clearSessionStructureState(session);
-    session.status = result.todos.some((todo) => todo.blocking) ? "needs_clarification" : "draft_ready";
-    compactActivity(session, "草稿已保存，等待人工审核");
+    const assistantMessage = message("assistant", result.reply, { draftUpdated: true, todoCount: result.todos.length });
+    session = await store.updateSession(session.id, (latest) => {
+      latest.messages = mergeRecordsById(latest.messages, session.messages);
+      latest.activities = mergeRecordsById(latest.activities, session.activities);
+      latest.draft = result.draft;
+      latest.todos = mergeSessionTodos(latest.todos, result.todos);
+      latest.messages.push(assistantMessage);
+      latest.turnCount = (session.turnCount ?? 0) + 1;
+      clearSessionStructureState(latest);
+      const pendingCount = latest.todos.filter((todo) => todo.revisionPending === true).length;
+      latest.status = pendingCount > 0
+        ? "queued"
+        : latest.todos.some((todo) => todo.status === "open" && todo.blocking) ? "needs_clarification" : "draft_ready";
+      compactActivity(latest, pendingCount > 0
+        ? `${pendingCount} 项追加澄清已排队，准备继续修订`
+        : "草稿已保存，等待人工审核");
+      return latest;
+    });
+    if (!session) throw new Error("Session 已被删除");
     await writeFile(path.join(workspace, "current-draft.json"), `${JSON.stringify(result.draft, null, 2)}\n`, "utf8");
-    await store.saveSession(session);
-    onEvent({ type: "completed", session: await store.readSession(session.id) });
+    onEvent({ type: "completed", session });
     return session;
   } catch (error) {
-    session.status = "failed";
-    session.error = error instanceof Error ? error.message : "Claude Code 执行失败";
-    session.messages.push(message("system", session.error));
-    compactActivity(session, "本轮执行失败");
-    await store.saveSession(session);
-    onEvent({ type: "failed", error: session.error, session: await store.readSession(session.id) });
+    if (error instanceof SessionTurnCancelledError || cancelledSessionTurns.has(session.id)) {
+      session = await persistCancelledTurn(session, onEvent, pendingAtStart) ?? session;
+      throw error instanceof SessionTurnCancelledError ? error : new SessionTurnCancelledError();
+    }
+    const errorMessage = error instanceof Error ? error.message : "Claude Code 执行失败";
+    session = await store.updateSession(session.id, (latest) => {
+      latest.messages = mergeRecordsById(latest.messages, session.messages);
+      latest.activities = mergeRecordsById(latest.activities, session.activities);
+      restorePendingClarifications(latest, pendingAtStart);
+      latest.status = "failed";
+      latest.error = errorMessage;
+      latest.messages.push(message("system", errorMessage));
+      compactActivity(latest, "本轮执行失败");
+      return latest;
+    }) ?? session;
+    onEvent({ type: "failed", error: errorMessage, session });
     throw error;
   } finally {
     runningSessions.delete(session.id);
+    activeSessionTurns.delete(session.id);
+    cancelledSessionTurns.delete(session.id);
     const pendingTables = pendingDatasetReconciliations.get(session.id);
     if (pendingTables) {
       pendingDatasetReconciliations.delete(session.id);
       await store.reconcileSessions(pendingTables, { onlySessionIds: [session.id] });
     }
+    setImmediate(() => drainPendingClarifications(session.id));
+  }
+}
+
+function queuedClarificationMessage(todos) {
+  const items = todos.map((todo, index) => [
+    `${index + 1}. ${todo.scope === "field" && todo.fieldName ? `字段 ${todo.fieldName}：` : ""}${todo.question}`,
+    `人工回答：${todo.answer}`,
+  ].join("\n"));
+  return `请根据以下已经提交的多项人工澄清，集中修订当前草稿：\n\n${items.join("\n\n")}`;
+}
+
+async function drainPendingClarifications(sessionId) {
+  if (pendingClarificationDrains.has(sessionId)) return;
+  pendingClarificationDrains.add(sessionId);
+  try {
+    while (true) {
+      while (activeSessionTurns.has(sessionId) || scheduledSessionTurns.has(sessionId) || runningSessions.has(sessionId)) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      let queuedSession = await store.readSession(sessionId);
+      if (!queuedSession || ["cancelled", "cancelling", "failed", "stale"].includes(queuedSession.status)) return;
+      const pendingTodos = queuedSession.todos.filter((todo) => todo.status === "answered" && todo.answer && todo.revisionPending === true);
+      if (pendingTodos.length === 0) return;
+      queuedSession = await store.updateSession(sessionId, (latest) => {
+        latest.status = "queued";
+        latest.error = null;
+        compactActivity(latest, `${latest.todos.filter((todo) => todo.revisionPending === true).length} 项追加澄清正在排队`);
+        return latest;
+      });
+      if (!queuedSession) return;
+      const currentPending = queuedSession.todos.filter((todo) => todo.status === "answered" && todo.answer && todo.revisionPending === true);
+      if (currentPending.length === 0) continue;
+      const table = JSON.parse(await readFile(path.join(store.workspacePath(sessionId), "input-table.json"), "utf8"));
+      const datasetContext = await requestDatasetContext(queuedSession.datasetId, table.tableName);
+      scheduledSessionTurns.add(sessionId);
+      try {
+        await runClaudeTurn({
+          session: queuedSession,
+          table,
+          mode: "correct",
+          userMessage: queuedClarificationMessage(currentPending),
+          datasetContext,
+          referencePaths: queuedSession.referencePaths ?? [],
+          promptTemplate: queuedSession.promptTemplate || defaultPromptTemplate,
+        });
+      } catch {
+        return;
+      } finally {
+        scheduledSessionTurns.delete(sessionId);
+      }
+    }
+  } finally {
+    pendingClarificationDrains.delete(sessionId);
   }
 }
 
@@ -284,9 +448,17 @@ async function allTodos() {
 
 async function recoverInterruptedWork() {
   const sessionSummaries = await store.listSessions();
-  for (const summary of sessionSummaries.filter((item) => ["running", "queued"].includes(item.status))) {
+  for (const summary of sessionSummaries.filter((item) => ["running", "queued", "cancelling"].includes(item.status))) {
     const session = await store.readSession(summary.id);
     if (!session) continue;
+    if (summary.status === "cancelling") {
+      session.status = "cancelled";
+      session.error = null;
+      session.messages.push(message("system", SESSION_TURN_CANCELLED_MESSAGE));
+      compactActivity(session, "本轮执行已由人工停止");
+      await store.saveSession(session);
+      continue;
+    }
     session.status = "failed";
     session.error = "服务重启中断了上一轮执行，请在表级对话中重新发送。";
     session.messages.push(message("system", session.error));
@@ -304,7 +476,7 @@ async function recoverInterruptedWork() {
 
 async function stopSessionProcess(sessionId) {
   const child = runningSessions.get(sessionId);
-  if (!child) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   await new Promise((resolve) => {
     let settled = false;
     let forceTimer;
@@ -325,6 +497,41 @@ async function stopSessionProcess(sessionId) {
     finishTimer = setTimeout(finish, 5_000);
     finishTimer.unref?.();
   });
+}
+
+async function handleCancelSession(response, sessionId) {
+  let session = await store.readSession(sessionId);
+  if (!session) return jsonResponse(response, 404, { error: "会话不存在" });
+  const child = runningSessions.get(session.id);
+  const processRunning = Boolean(child && child.exitCode === null && child.signalCode === null);
+  const turnActive = activeSessionTurns.has(session.id) || scheduledSessionTurns.has(session.id);
+  if (session.status === "cancelling") {
+    if (processRunning) await stopSessionProcess(session.id);
+    if (!processRunning && !turnActive) {
+      const cancelled = await persistCancelledTurn(session);
+      cancelledSessionTurns.delete(session.id);
+      return jsonResponse(response, 202, { session: cancelled });
+    }
+    return jsonResponse(response, 202, { session: await store.readSession(session.id) });
+  }
+  if (!processRunning && !turnActive && session.status !== "queued") {
+    return jsonResponse(response, 409, { error: "当前 Session 没有正在执行的本轮任务" });
+  }
+  cancelledSessionTurns.add(session.id);
+  session = await store.updateSession(session.id, (latest) => {
+    latest.status = "cancelling";
+    latest.error = null;
+    compactActivity(latest, "正在停止本轮执行");
+    return latest;
+  });
+  if (!session) return jsonResponse(response, 404, { error: "会话不存在" });
+  if (processRunning) await stopSessionProcess(session.id);
+  if (!processRunning && !turnActive) {
+    const cancelled = await persistCancelledTurn(session);
+    cancelledSessionTurns.delete(session.id);
+    return jsonResponse(response, 202, { session: cancelled });
+  }
+  return jsonResponse(response, 202, { session: await store.readSession(session.id) });
 }
 
 async function cancelJob(job) {
@@ -525,7 +732,7 @@ async function handleTodoAnswer(request, response, todoId) {
   const todos = await allTodos();
   const target = todos.find((todo) => todo.id === todoId);
   if (!target) throw Object.assign(new Error("待澄清项不存在"), { statusCode: 404 });
-  const session = await store.readSession(target.sessionId);
+  let session = await store.readSession(target.sessionId);
   if (!session) throw Object.assign(new Error("待澄清项所属会话不存在"), { statusCode: 404 });
   if (body.table !== undefined && !validTable(body.table)) {
     throw Object.assign(new Error("当前表数据无效"), { statusCode: 400 });
@@ -538,28 +745,66 @@ async function handleTodoAnswer(request, response, todoId) {
     : JSON.parse(await readFile(path.join(store.workspacePath(session.id), "input-table.json"), "utf8"));
   const promptTemplate = requestPromptTemplate(body.promptTemplate, session.promptTemplate || defaultPromptTemplate);
   const datasetContext = await requestDatasetContext(body.datasetId || session.datasetId, table.tableName);
+  let startImmediately = false;
+  let scheduledByRequest = false;
+  try {
+    session = await store.updateSession(session.id, (latest) => {
+      const todo = latest.todos.find((item) => item.id === todoId);
+      if (!todo) throw Object.assign(new Error("待澄清项已不存在"), { statusCode: 404 });
+      if (todo.status !== "open") throw Object.assign(new Error("待澄清项已失效或已经处理"), { statusCode: 409 });
+      const sessionBusy = activeSessionTurns.has(latest.id)
+        || scheduledSessionTurns.has(latest.id)
+        || runningSessions.has(latest.id)
+        || ["queued", "running", "cancelling"].includes(latest.status);
+      todo.status = "answered";
+      todo.answer = answer;
+      todo.answeredAt = now();
+      todo.revisionPending = sessionBusy;
+      if (sessionBusy) {
+        const pendingCount = latest.todos.filter((item) => item.revisionPending === true).length;
+        compactActivity(latest, `已收到追加澄清，当前共有 ${pendingCount} 项等待后续修订`);
+      } else {
+        latest.status = "queued";
+        compactActivity(latest, "澄清已提交，等待恢复 Session");
+        scheduledSessionTurns.add(latest.id);
+        scheduledByRequest = true;
+        startImmediately = true;
+      }
+      return latest;
+    });
+  } catch (error) {
+    if (scheduledByRequest) scheduledSessionTurns.delete(target.sessionId);
+    throw error;
+  }
+  if (!session) throw Object.assign(new Error("待澄清项所属会话不存在"), { statusCode: 404 });
   const todo = session.todos.find((item) => item.id === todoId);
-  if (!todo) throw Object.assign(new Error("待澄清项已不存在"), { statusCode: 404 });
-  if (todo.status !== "open") throw Object.assign(new Error("待澄清项已失效或已经处理"), { statusCode: 409 });
-  todo.status = "answered";
-  todo.answer = answer;
-  todo.answeredAt = now();
-  session.status = "queued";
-  await store.saveSession(session);
-  setImmediate(async () => {
-    try {
-      await runClaudeTurn({
-        session,
-        table,
-        mode: "correct",
-        userMessage: answer,
-        datasetContext,
-        referencePaths: session.referencePaths ?? [],
-        promptTemplate,
-      });
-    } catch { /* failure is visible in the session */ }
+  if (startImmediately) {
+    setImmediate(async () => {
+      try {
+        await runClaudeTurn({
+          session,
+          table,
+          mode: "correct",
+          userMessage: answer,
+          datasetContext,
+          referencePaths: session.referencePaths ?? [],
+          promptTemplate,
+        });
+      } catch { /* failure is visible in the session */ }
+      finally {
+        scheduledSessionTurns.delete(session.id);
+        setImmediate(() => drainPendingClarifications(session.id));
+      }
+    });
+  } else {
+    setImmediate(() => drainPendingClarifications(session.id));
+  }
+  jsonResponse(response, 202, {
+    session,
+    todo,
+    queued: !startImmediately,
+    pendingClarificationCount: session.todos.filter((item) => item.revisionPending === true).length,
   });
-  jsonResponse(response, 202, { sessionId: session.id, todo });
 }
 
 function sharedConflictResponse(response, error) {
@@ -668,6 +913,11 @@ async function handleRequest(request, response) {
   if (url.pathname === "/api/ai/jobs/cancel") {
     if (request.method !== "POST") return methodNotAllowed(response);
     return handleCancelJobs(request, response);
+  }
+  const sessionCancelMatch = url.pathname.match(/^\/api\/ai\/sessions\/([0-9a-f-]+)\/cancel$/i);
+  if (sessionCancelMatch) {
+    if (request.method !== "POST") return methodNotAllowed(response);
+    return handleCancelSession(response, sessionCancelMatch[1]);
   }
   const sessionMatch = url.pathname.match(/^\/api\/ai\/sessions\/([0-9a-f-]+)$/i);
   if (sessionMatch) {

@@ -82,6 +82,8 @@ exit
 
 Session 由 Schema Atlas 生成 UUID 并登记，前端不会混入用户在其他目录手工创建的 Claude Code 会话。继续对话时复用同一个 Session ID，并通过 Claude Code `--resume` 保留此前上下文、草稿和澄清结果，不会悄悄新建会话。每个 Session 绑定一个内容哈希数据集版本，保证后续可以确认当时参考了哪些表。服务器只把落盘数据集和允许根目录中的路径传给 `--add-dir`，不建立向量索引。
 
+Session 处于排队或执行状态时，表级审核页和 `Sessions` 详情页都会显示“停止本轮”。该操作只终止当前 Claude Code 进程，不删除 Session、既有对话、草稿或人工澄清，之后仍可在原 Session 继续。若同一 Session 有多项待澄清，可以连续提交：第一项触发修订，运行期间提交的其他答案会立即落盘并显示排队数量，当前轮结束后由后台合并为下一轮修订，不会并发启动多个 Claude Code 进程。
+
 ### 提示词配置
 
 默认完整提示词保存在 [`config/default-annotation-prompt.txt`](./config/default-annotation-prompt.txt)，默认单表和批量要求也分别位于 `config/default-table-instruction.txt`、`config/default-batch-instruction.txt`，不会隐藏在服务端业务代码中。“AI 标注 → 批量生成”的“生成配置”会把完整模板、本地资料路径和连接状态放在同一工作面；模板可直接编辑、自动保存到团队共享工作区，也可一键恢复默认。默认检索顺序是原始 JSON 与关系、RB/WEB/DB 中的精确表名和字段名、必要的同域资料；Teleco_Context 每个任务只读取一个 entity-class 样例，必要时再读取一个 enum 样例，且只用于输出格式与标注粒度。单表生成、批量生成和 TODO 澄清续写都使用发起任务时的当前模板。逐字段 AI 标注分析只保存在 Session 审核草稿中，不会增加或污染最终导出的 Ontology 与 RDB Mapping JSON 字段。

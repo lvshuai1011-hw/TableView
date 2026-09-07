@@ -50,6 +50,7 @@ export type AiTodo = {
   answer: string;
   createdAt: string;
   answeredAt: string | null;
+  revisionPending?: boolean;
   dismissedAt?: string | null;
   dismissedReason?: "field_deleted" | "table_deleted";
   restoredAt?: string | null;
@@ -82,6 +83,7 @@ export type AiSessionSummary = {
   updatedAt: string;
   messageCount: number;
   todoCount: number;
+  pendingClarificationCount?: number;
   hasDraft: boolean;
   staleReason?: "table_deleted" | "table_restored_requires_review" | "fields_restored_requires_review" | "fields_added_requires_review" | null;
   staleAt?: string | null;

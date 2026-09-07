@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -654,6 +654,165 @@ console.log(JSON.stringify({ type: "result", is_error: false, structured_output:
     assert.equal(deleteResponse.status, 200);
     assert.equal((await (await fetch(`${origin}/api/ai/sessions`)).json()).sessions.length, 0);
     await assert.rejects(readFile(contextPath, "utf8"));
+  } finally {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    Object.entries(previous).forEach(([key, value]) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    });
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("stops one Session turn and serializes additional clarification answers", async () => {
+  const testRuntimeRoot = path.join(projectRoot, ".sites-runtime", "tests");
+  await mkdir(testRuntimeRoot, { recursive: true });
+  const temp = await mkdtemp(path.join(testRuntimeRoot, "schema-atlas-cancel-"));
+  const fakeClaude = path.join(temp, "fake-claude-cancellable.mjs");
+  await writeFile(fakeClaude, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("fake-claude 1.0.0"); process.exit(0); }
+if (args[0] === "auth" && args[1] === "status") { console.log("authenticated"); process.exit(0); }
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const sessionFlag = args.indexOf("--session-id");
+const resumeFlag = args.indexOf("--resume");
+const sessionId = sessionFlag >= 0 ? args[sessionFlag + 1] : args[resumeFlag + 1];
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: sessionId }));
+console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "正在处理测试轮次" }] } }));
+if (input.includes("STOP_ME")) {
+  process.on("SIGTERM", () => process.exit(143));
+  await new Promise(() => {});
+}
+if (input.includes("FIRST_ANSWER")) await new Promise((resolve) => setTimeout(resolve, 650));
+const draft = {
+  tableName: "PE_FREE_UNIT",
+  className: "FreeUnitInstance",
+  classDescription: "免费资源实例",
+  classAliases: ["免费资源"],
+  confidence: "high",
+  columns: [
+    { name: "FREE_UNIT_ID", included: true, entityColumn: "freeUnitID", aliases: ["免费资源标识"], detailedDescription: "免费资源实例标识", enumValues: [], enumRef: "", enumDescription: "", confidence: "high", analysisSummary: "主键业务标识", reason: "input-table.json" },
+    { name: "FREE_UNIT_TYPE_ID", included: true, entityColumn: "freeUnitTypeID", aliases: ["免费资源类型标识"], detailedDescription: "免费资源类型标识", enumValues: [], enumRef: "", enumDescription: "", confidence: "medium", analysisSummary: "类型关联标识", reason: "input-table.json" }
+  ]
+};
+const todos = input.includes("INITIAL_TODOS") ? [
+  { scope: "field", fieldName: "FREE_UNIT_ID", question: "请确认免费资源标识语义", reason: "资料不足", checkedSources: ["input-table.json"], suggestions: [], blocking: true },
+  { scope: "field", fieldName: "FREE_UNIT_TYPE_ID", question: "请确认免费资源类型语义", reason: "资料不足", checkedSources: ["input-table.json"], suggestions: [], blocking: true },
+  { scope: "table", fieldName: "", question: "请确认当前表的业务边界", reason: "资料不足", checkedSources: ["input-table.json"], suggestions: [], blocking: true }
+] : [];
+console.log(JSON.stringify({ type: "result", is_error: false, structured_output: { reply: "本轮完成", draft, todos } }));
+`, "utf8");
+  await chmod(fakeClaude, 0o755);
+
+  const previous = {
+    CLAUDE_BIN: process.env.CLAUDE_BIN,
+    SCHEMA_ATLAS_AI_DATA_DIR: process.env.SCHEMA_ATLAS_AI_DATA_DIR,
+    SCHEMA_ATLAS_AI_PORT: process.env.SCHEMA_ATLAS_AI_PORT,
+    SCHEMA_ATLAS_ALLOW_ROOT: process.env.SCHEMA_ATLAS_ALLOW_ROOT,
+    SCHEMA_ATLAS_PROJECT_ROOT: process.env.SCHEMA_ATLAS_PROJECT_ROOT,
+    SCHEMA_ATLAS_REFERENCE_ROOTS: process.env.SCHEMA_ATLAS_REFERENCE_ROOTS,
+  };
+  Object.assign(process.env, {
+    CLAUDE_BIN: fakeClaude,
+    SCHEMA_ATLAS_AI_DATA_DIR: path.join(temp, "data"),
+    SCHEMA_ATLAS_AI_PORT: "0",
+    SCHEMA_ATLAS_ALLOW_ROOT: "1",
+    SCHEMA_ATLAS_PROJECT_ROOT: projectRoot,
+    SCHEMA_ATLAS_REFERENCE_ROOTS: projectRoot,
+  });
+  let server;
+  const waitFor = async (read, accept, timeout = 8_000) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeout) {
+      const value = await read();
+      if (accept(value)) return value;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    throw new Error("等待 Session 状态超时");
+  };
+  try {
+    const moduleUrl = new URL(`../local-ai/server.mjs?cancel-test=${Date.now()}`, import.meta.url);
+    const { startServer } = await import(moduleUrl.href);
+    server = await startServer();
+    const address = server.address();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const syncResponse = await fetch(`${origin}/api/ai/datasets/sync`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tables: [table] }),
+    });
+    const { dataset } = await syncResponse.json();
+
+    const stoppedStream = fetch(`${origin}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ table, datasetId: dataset.id, message: "STOP_ME", referencePaths: [], promptTemplate: defaultPromptTemplate }),
+    }).then((response) => response.text());
+    const running = await waitFor(
+      async () => (await (await fetch(`${origin}/api/ai/sessions`)).json()).sessions[0],
+      (session) => session?.status === "running",
+    );
+    const cancelResponse = await fetch(`${origin}/api/ai/sessions/${running.id}/cancel`, { method: "POST", body: "{}" });
+    assert.equal(cancelResponse.status, 202);
+    const stoppedEvents = (await stoppedStream).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(stoppedEvents.some((event) => event.type === "cancelled"));
+    const stopped = await (await fetch(`${origin}/api/ai/sessions/${running.id}`)).json();
+    assert.equal(stopped.session.status, "cancelled");
+    assert.equal(stopped.session.turnCount, 0);
+    assert.equal(stopped.session.error, null);
+    assert.match(stopped.session.messages.at(-1).content, /此前对话、草稿和澄清内容均已保留/);
+
+    const continuation = await fetch(`${origin}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ table, datasetId: dataset.id, sessionId: running.id, message: "CONTINUE", referencePaths: [], promptTemplate: defaultPromptTemplate }),
+    });
+    const continuationEvents = (await continuation.text()).trim().split("\n").map((line) => JSON.parse(line));
+    const continued = continuationEvents.find((event) => event.type === "completed");
+    assert.equal(continued.session.id, running.id);
+    assert.equal(continued.session.turnCount, 1);
+    const idleCancel = await fetch(`${origin}/api/ai/sessions/${running.id}/cancel`, { method: "POST", body: "{}" });
+    assert.equal(idleCancel.status, 409);
+
+    const todoResponse = await fetch(`${origin}/api/ai/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ table, datasetId: dataset.id, message: "INITIAL_TODOS", referencePaths: [], promptTemplate: defaultPromptTemplate }),
+    });
+    const todoEvents = (await todoResponse.text()).trim().split("\n").map((line) => JSON.parse(line));
+    const todoSession = todoEvents.find((event) => event.type === "completed").session;
+    assert.equal(todoSession.todos.length, 3);
+    const [firstTodo, secondTodo] = todoSession.todos;
+    const firstAnswer = await fetch(`${origin}/api/ai/todos/${firstTodo.id}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answer: "FIRST_ANSWER", table, datasetId: dataset.id, promptTemplate: defaultPromptTemplate }),
+    });
+    assert.equal((await firstAnswer.json()).queued, false);
+    await waitFor(
+      async () => (await (await fetch(`${origin}/api/ai/sessions/${todoSession.id}`)).json()).session,
+      (session) => session?.status === "running",
+    );
+    const secondAnswer = await fetch(`${origin}/api/ai/todos/${secondTodo.id}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answer: "SECOND_ANSWER", table, datasetId: dataset.id, promptTemplate: defaultPromptTemplate }),
+    });
+    const queued = await secondAnswer.json();
+    assert.equal(queued.queued, true);
+    assert.equal(queued.pendingClarificationCount, 1);
+    assert.equal(queued.session.todos.find((todo) => todo.id === secondTodo.id).revisionPending, true);
+    const revised = await waitFor(
+      async () => (await (await fetch(`${origin}/api/ai/sessions/${todoSession.id}`)).json()).session,
+      (session) => session?.turnCount === 3 && session.status === "needs_clarification",
+    );
+    assert.equal(revised.todos.filter((todo) => todo.status === "answered").length, 2);
+    assert.equal(revised.todos.filter((todo) => todo.status === "open").length, 1);
+    assert.match(revised.todos.find((todo) => todo.status === "open").question, /业务边界/);
+    assert.equal(revised.todos.filter((todo) => todo.revisionPending === true).length, 0);
+    assert.equal((await (await fetch(`${origin}/api/ai/sessions`)).json()).sessions.find((session) => session.id === todoSession.id).pendingClarificationCount, 0);
+    await new Promise((resolve) => setTimeout(resolve, 150));
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     Object.entries(previous).forEach(([key, value]) => {

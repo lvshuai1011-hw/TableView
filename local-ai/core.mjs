@@ -1115,38 +1115,50 @@ export class AtlasStore {
     return this.readJson(this.sessionPath(id), null);
   }
 
+  async persistSession(session) {
+    session.updatedAt = new Date().toISOString();
+    await this.atomicWrite(this.sessionPath(session.id), session);
+    const index = await this.readJson(this.sessionIndexPath, []);
+    const summary = {
+      id: session.id,
+      claudeSessionId: session.claudeSessionId,
+      name: session.name,
+      source: "schema-atlas",
+      tableName: session.tableName,
+      domain0: session.domain0,
+      jobId: session.jobId ?? null,
+      datasetId: session.datasetId ?? null,
+      relatedTableCount: session.relatedTableCount ?? 0,
+      status: session.status,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      messageCount: session.messages.length,
+      todoCount: session.todos.filter((todo) => todo.status === "open").length,
+      pendingClarificationCount: session.todos.filter((todo) => todo.revisionPending === true).length,
+      hasDraft: Boolean(session.draft),
+      staleReason: session.staleReason ?? null,
+      staleAt: session.staleAt ?? null,
+      removedFieldNames: uniqueNames(session.removedFieldNames),
+      restoredFieldNames: uniqueNames(session.restoredFieldNames),
+      structureChangedAt: session.structureChangedAt ?? null,
+      error: session.error ?? null,
+    };
+    const next = [summary, ...index.filter((item) => item.id !== session.id)]
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    await this.atomicWrite(this.sessionIndexPath, next);
+    return session;
+  }
+
   async saveSession(session) {
+    return this.serialize(() => this.persistSession(session));
+  }
+
+  async updateSession(id, update) {
     return this.serialize(async () => {
-      session.updatedAt = new Date().toISOString();
-      await this.atomicWrite(this.sessionPath(session.id), session);
-      const index = await this.readJson(this.sessionIndexPath, []);
-      const summary = {
-        id: session.id,
-        claudeSessionId: session.claudeSessionId,
-        name: session.name,
-        source: "schema-atlas",
-        tableName: session.tableName,
-        domain0: session.domain0,
-        jobId: session.jobId ?? null,
-        datasetId: session.datasetId ?? null,
-        relatedTableCount: session.relatedTableCount ?? 0,
-        status: session.status,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-        messageCount: session.messages.length,
-        todoCount: session.todos.filter((todo) => todo.status === "open").length,
-        hasDraft: Boolean(session.draft),
-        staleReason: session.staleReason ?? null,
-        staleAt: session.staleAt ?? null,
-        removedFieldNames: uniqueNames(session.removedFieldNames),
-        restoredFieldNames: uniqueNames(session.restoredFieldNames),
-        structureChangedAt: session.structureChangedAt ?? null,
-        error: session.error ?? null,
-      };
-      const next = [summary, ...index.filter((item) => item.id !== session.id)]
-        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-      await this.atomicWrite(this.sessionIndexPath, next);
-      return session;
+      const session = await this.readJson(this.sessionPath(id), null);
+      if (!session) return null;
+      const updated = await update(session);
+      return this.persistSession(updated ?? session);
     });
   }
 

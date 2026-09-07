@@ -63,6 +63,18 @@ test("groups review and clarification queues by level-zero domain", async () => 
   assert.match(css, /\.ai-domain-task-group\s*\{/);
 });
 
+test("exposes per-Session stop controls and clarification queue feedback", async () => {
+  const source = await readFile(path.join(root, "app", "ai-panel.tsx"), "utf8");
+  const css = await readFile(path.join(root, "app", "globals.css"), "utf8");
+
+  assert.match(source, /\/api\/ai\/sessions\/\$\{targetSession\.id\}\/cancel/);
+  assert.match(source, /停止本轮/);
+  assert.match(source, /加入队列/);
+  assert.match(source, /澄清等待后续修订/);
+  assert.match(css, /\.ai-session-stop\s*\{/);
+  assert.match(css, /\.ai-clarification-queue\s*\{/);
+});
+
 test("keeps the field editor body scrollable and can focus the first missing requirement", async () => {
   const source = await readFile(path.join(root, "app", "editor-dialogs.tsx"), "utf8");
   const css = await readFile(path.join(root, "app", "globals.css"), "utf8");

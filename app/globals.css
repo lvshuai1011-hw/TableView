@@ -676,6 +676,9 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-review-pane > header > div { display: flex; align-items: center; gap: 7px; color: #3c596d; }
 .ai-review-pane > header strong { font-size: 15px; }
 .ai-review-pane > header > span { display: flex; align-items: center; gap: 5px; color: #71858f; font-size: 13px; }
+.ai-session-header-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.ai-session-stop { min-width: 106px; height: 32px !important; font-size: 14px !important; font-weight: 700; }
+.ai-queue-badge { color: #8b651e; background: #fff7df; border-color: #e7cf91; font-size: 12px !important; }
 .ai-review-pane-scroll { min-height: 0; flex: 1; padding: 13px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #bdc9cd transparent; }
 .ai-review-conversation-pane { background: #f6f9f9; }
 .ai-review-conversation-pane .ai-review-pane-scroll { background: #f2f6f6; }
@@ -689,6 +692,12 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-review-trace .ai-trace { margin-top: 0; }
 
 .ai-transcript { display: grid; align-content: start; gap: 10px; }
+.ai-clarification-queue { display: grid; gap: 7px; padding: 11px 12px; color: #725d2c; background: #fff9e9; border: 1px solid #e8d7aa; border-radius: 9px; }
+.ai-clarification-queue > div:first-child { display: flex; align-items: center; gap: 7px; }
+.ai-clarification-queue strong { font-size: 14px; }
+.ai-clarification-queue p { margin: 0; color: #89764b; font-size: 13px; line-height: 1.5; }
+.ai-clarification-queue > div:last-child { display: grid; gap: 4px; }
+.ai-clarification-queue > div:last-child span { padding: 5px 7px; color: #655630; background: rgba(255, 255, 255, .72); border-radius: 5px; font-size: 13px; line-height: 1.45; }
 .ai-message { max-width: 88%; display: grid; gap: 7px; padding: 11px 13px; background: #fff; border: 1px solid #dde6e8; border-radius: 4px 12px 12px 12px; }
 .ai-message.user { justify-self: end; color: #fff; background: #16786f; border-color: #16786f; border-radius: 12px 4px 12px 12px; }
 .ai-message.system { max-width: 100%; justify-self: stretch; background: #f8fafb; border-style: dashed; }
@@ -788,6 +797,10 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .ai-todo-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
 .ai-todo-compose input, .ai-todo-compose button { height: 35px; font-size: 14px; }
 .ai-todo-answer { display: flex; align-items: flex-start; gap: 7px; padding: 8px 9px; color: #317468; background: #ecf7f4; border-radius: 7px; font-size: 14px; }
+.ai-todo-answer.is-queued { color: #806123; background: #fff7df; }
+.ai-todo-answer span { flex: 1; }
+.ai-todo-answer small { color: inherit; font-size: 12px; white-space: nowrap; }
+.ai-todo-queue-hint { color: #8b7138; font-size: 13px; line-height: 1.5; }
 
 .ai-chat-composer { z-index: 2; display: grid; gap: 8px; margin: 0; padding: 12px 13px 14px; background: rgba(255, 255, 255, .98); border-top: 1px solid #dce5e7; backdrop-filter: blur(12px); }
 .ai-chat-composer textarea { min-height: 74px; resize: vertical; font-size: 15px; line-height: 1.55; }
